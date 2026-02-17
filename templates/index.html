@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FactorMiner - A-Share Alpha Factor Mining</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <style>
+    body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    .tab-active { border-bottom: 2px solid #6366f1; color: #6366f1; font-weight: 600; }
+    .tab-inactive { color: #6b7280; }
+    .tab-inactive:hover { color: #4b5563; }
+    .log-entry { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.8rem; }
+    .metric-card { transition: transform 0.15s ease; }
+    .metric-card:hover { transform: translateY(-2px); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen">
+
+  <!-- Header -->
+  <header class="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
+          <span class="text-white font-bold text-sm">FM</span>
+        </div>
+        <div>
+          <h1 class="text-lg font-bold text-gray-900">FactorMiner</h1>
+          <p class="text-xs text-gray-500">A-Share Alpha Factor Mining System</p>
+        </div>
+      </div>
+      <div id="statusBadge" class="flex items-center gap-2 px-3 py-1.5 bg-gray-100 rounded-full text-sm">
+        <span id="statusDot" class="w-2 h-2 rounded-full bg-gray-400"></span>
+        <span id="statusText">Idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Tabs -->
+  <nav class="bg-white border-b border-gray-200">
+    <div class="max-w-7xl mx-auto px-6 flex gap-8">
+      <button onclick="switchTab('mining')" id="tab-mining" class="py-3 text-sm tab-active">Mining Control</button>
+      <button onclick="switchTab('factors')" id="tab-factors" class="py-3 text-sm tab-inactive">Factor Library</button>
+      <button onclick="switchTab('backtest')" id="tab-backtest" class="py-3 text-sm tab-inactive">Backtest</button>
+      <button onclick="switchTab('memory')" id="tab-memory" class="py-3 text-sm tab-inactive">Experience Memory</button>
+    </div>
+  </nav>
+
+  <main class="max-w-7xl mx-auto px-6 py-6">
+
+    <!-- ===== Mining Control Tab ===== -->
+    <div id="panel-mining">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Config & Control -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Configuration</h2>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Stock Universe</label>
+              <select id="cfg-universe" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+                <option value="000300">CSI 300</option>
+                <option value="000905">CSI 500</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Batch Size</label>
+                <input id="cfg-batch" type="number" value="10" min="1" max="50" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Max Rounds</label>
+                <input id="cfg-rounds" type="number" value="50" min="1" max="500" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">IC Threshold</label>
+                <input id="cfg-ic" type="number" value="0.02" step="0.005" min="0.001" max="0.1" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Corr Budget</label>
+                <input id="cfg-corr" type="number" value="0.7" step="0.05" min="0.3" max="0.95" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+              </div>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Target Library Size</label>
+              <input id="cfg-target" type="number" value="100" min="5" max="1000" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            </div>
+          </div>
+
+          <div class="mt-6 flex gap-3">
+            <button onclick="startMining()" id="btn-start" class="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-4 py-2.5 text-sm font-medium transition-colors">
+              Start Mining
+            </button>
+            <button onclick="stopMining()" id="btn-stop" class="flex-1 bg-red-500 hover:bg-red-600 text-white rounded-lg px-4 py-2.5 text-sm font-medium transition-colors hidden">
+              Stop Mining
+            </button>
+          </div>
+
+          <!-- Status Metrics -->
+          <div class="mt-6 grid grid-cols-2 gap-3">
+            <div class="metric-card bg-indigo-50 rounded-lg p-3 text-center">
+              <div id="metric-round" class="text-2xl font-bold text-indigo-600">0</div>
+              <div class="text-xs text-gray-500 mt-1">Current Round</div>
+            </div>
+            <div class="metric-card bg-emerald-50 rounded-lg p-3 text-center">
+              <div id="metric-factors" class="text-2xl font-bold text-emerald-600">0</div>
+              <div class="text-xs text-gray-500 mt-1">Factors Found</div>
+            </div>
+            <div class="metric-card bg-amber-50 rounded-lg p-3 text-center">
+              <div id="metric-rate" class="text-2xl font-bold text-amber-600">0%</div>
+              <div class="text-xs text-gray-500 mt-1">Admission Rate</div>
+            </div>
+            <div class="metric-card bg-purple-50 rounded-lg p-3 text-center">
+              <div id="metric-target" class="text-2xl font-bold text-purple-600">100</div>
+              <div class="text-xs text-gray-500 mt-1">Target Size</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Mining Log -->
+        <div class="lg:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col" style="max-height: 600px;">
+          <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Mining Log</h2>
+            <button onclick="clearLog()" class="text-xs text-gray-400 hover:text-gray-600">Clear</button>
+          </div>
+          <div id="mining-log" class="flex-1 overflow-y-auto px-6 py-3 space-y-1 bg-gray-50/50">
+            <div class="log-entry text-gray-400">Waiting to start...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Admission Rate Chart -->
+      <div class="mt-6 bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+        <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Admission Rate by Round</h2>
+        <div id="chart-admission" style="height: 250px;"></div>
+      </div>
+    </div>
+
+    <!-- ===== Factor Library Tab ===== -->
+    <div id="panel-factors" class="hidden">
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide">Discovered Factors</h2>
+          <button onclick="loadFactors()" class="text-xs bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg hover:bg-indigo-100 transition-colors">Refresh</button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Expression</th>
+                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase cursor-pointer" onclick="sortFactors('ic_mean')">IC</th>
+                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase cursor-pointer" onclick="sortFactors('icir')">ICIR</th>
+                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase cursor-pointer" onclick="sortFactors('max_correlation')">Max Corr</th>
+                <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase cursor-pointer" onclick="sortFactors('turnover')">Turnover</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Logic</th>
+                <th class="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="factors-table" class="divide-y divide-gray-100"></tbody>
+          </table>
+        </div>
+        <div id="factors-empty" class="hidden px-6 py-12 text-center text-gray-400">
+          No factors discovered yet. Start mining to discover alpha factors.
+        </div>
+      </div>
+
+      <!-- Factor Detail Modal -->
+      <div id="factor-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-3xl mx-4 max-h-[85vh] overflow-y-auto">
+          <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+            <h3 class="font-semibold text-gray-900">Factor Detail</h3>
+            <button onclick="closeFactorModal()" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+          </div>
+          <div id="factor-modal-body" class="p-6">
+            <div class="text-center text-gray-400">Loading...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Backtest Tab ===== -->
+    <div id="panel-backtest" class="hidden">
+      <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Backtest Settings</h2>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Target</label>
+              <select id="bt-target" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="">Full Library</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">Combination Method</label>
+              <select id="bt-method" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                <option value="ic_weighted">IC Weighted</option>
+                <option value="icir_weighted">ICIR Weighted</option>
+                <option value="equal">Equal Weight</option>
+              </select>
+            </div>
+            <button onclick="runBacktest()" id="btn-backtest" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-4 py-2.5 text-sm font-medium transition-colors mt-2">
+              Run Backtest
+            </button>
+          </div>
+
+          <!-- Backtest Metrics -->
+          <div id="bt-metrics" class="mt-6 space-y-2 hidden">
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Sharpe</span><span id="bt-sharpe" class="font-semibold">-</span></div>
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Annual Return</span><span id="bt-annual" class="font-semibold">-</span></div>
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Max Drawdown</span><span id="bt-drawdown" class="font-semibold">-</span></div>
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Win Ratio</span><span id="bt-win" class="font-semibold">-</span></div>
+            <div class="flex justify-between text-sm"><span class="text-gray-500">Turnover</span><span id="bt-turnover" class="font-semibold">-</span></div>
+          </div>
+        </div>
+
+        <div class="lg:col-span-3 space-y-6">
+          <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Equity Curve</h2>
+            <div id="chart-equity" style="height: 300px;"></div>
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Quintile Returns</h2>
+            <div id="chart-quintile" style="height: 250px;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Experience Memory Tab ===== -->
+    <div id="panel-memory" class="hidden">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Mining State -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Mining State</h2>
+          <div id="memory-state" class="space-y-2 text-sm text-gray-600">Loading...</div>
+        </div>
+
+        <!-- Strategic Insights -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Strategic Insights</h2>
+          <div id="memory-insights" class="space-y-2">
+            <div class="text-sm text-gray-400">No insights yet</div>
+          </div>
+        </div>
+
+        <!-- Recommended Directions -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Recommended Directions</h2>
+          <div id="memory-recommended" class="space-y-2 max-h-80 overflow-y-auto">
+            <div class="text-sm text-gray-400">None yet</div>
+          </div>
+        </div>
+
+        <!-- Forbidden Directions -->
+        <div class="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+          <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">Forbidden Regions</h2>
+          <div id="memory-forbidden" class="space-y-2 max-h-80 overflow-y-auto">
+            <div class="text-sm text-gray-400">None yet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+<script>
+const API = '';
+let currentTab = 'mining';
+let factorData = [];
+let sortField = 'ic_mean';
+let sortDir = -1;
+let ws = null;
+let admissionHistory = [];
+
+// --- Tab Switching ---
+function switchTab(tab) {
+  ['mining', 'factors', 'backtest', 'memory'].forEach(t => {
+    document.getElementById('panel-' + t).classList.toggle('hidden', t !== tab);
+    document.getElementById('tab-' + t).className = t === tab ? 'py-3 text-sm tab-active' : 'py-3 text-sm tab-inactive';
+  });
+  currentTab = tab;
+  if (tab === 'factors') loadFactors();
+  if (tab === 'backtest') loadBacktestTargets();
+  if (tab === 'memory') loadMemory();
+}
+
+// --- WebSocket ---
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/mining');
+  ws.onmessage = function(e) {
+    const data = JSON.parse(e.data);
+    if (data.type === 'pong') return;
+    appendLog(data);
+  };
+  ws.onclose = function() {
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = function() {};
+}
+
+function appendLog(entry) {
+  const log = document.getElementById('mining-log');
+  const el = document.createElement('div');
+  el.className = 'log-entry ' + (entry.level === 'error' ? 'text-red-500' : entry.level === 'warning' ? 'text-amber-600' : 'text-gray-700');
+  const time = new Date(entry.time * 1000).toLocaleTimeString();
+  el.textContent = '[' + time + '] [R' + (entry.round || 0) + '] ' + entry.message;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+
+  if (entry.message && entry.message.includes('summary:')) {
+    const m = entry.message.match(/(\d+)\/(\d+) admitted/);
+    if (m) {
+      admissionHistory.push({ round: entry.round, admitted: parseInt(m[1]), total: parseInt(m[2]) });
+      renderAdmissionChart();
+    }
+  }
+  pollStatus();
+}
+
+function clearLog() {
+  document.getElementById('mining-log').innerHTML = '<div class="log-entry text-gray-400">Log cleared</div>';
+}
+
+// --- Mining Control ---
+async function startMining() {
+  const config = {
+    batch_size: parseInt(document.getElementById('cfg-batch').value),
+    max_rounds: parseInt(document.getElementById('cfg-rounds').value),
+    ic_threshold: parseFloat(document.getElementById('cfg-ic').value),
+    corr_threshold: parseFloat(document.getElementById('cfg-corr').value),
+    target_size: parseInt(document.getElementById('cfg-target').value),
+    stock_universe: document.getElementById('cfg-universe').value,
+  };
+  const res = await fetch(API + '/api/mining/start', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config)
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); return; }
+  document.getElementById('btn-start').classList.add('hidden');
+  document.getElementById('btn-stop').classList.remove('hidden');
+  appendLog({ time: Date.now()/1000, level: 'info', message: 'Mining started', round: 0 });
+}
+
+async function stopMining() {
+  await fetch(API + '/api/mining/stop', { method: 'POST' });
+  document.getElementById('btn-start').classList.remove('hidden');
+  document.getElementById('btn-stop').classList.add('hidden');
+  appendLog({ time: Date.now()/1000, level: 'warning', message: 'Stop requested', round: 0 });
+}
+
+async function pollStatus() {
+  try {
+    const res = await fetch(API + '/api/mining/status');
+    const s = await res.json();
+    document.getElementById('metric-round').textContent = s.current_round;
+    document.getElementById('metric-factors').textContent = s.library_size;
+    document.getElementById('metric-rate').textContent = (s.admission_rate * 100).toFixed(0) + '%';
+    document.getElementById('metric-target').textContent = s.target_size || '-';
+
+    const dot = document.getElementById('statusDot');
+    const txt = document.getElementById('statusText');
+    if (s.is_running) {
+      dot.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
+      txt.textContent = 'Mining (R' + s.current_round + ')';
+      document.getElementById('btn-start').classList.add('hidden');
+      document.getElementById('btn-stop').classList.remove('hidden');
+    } else {
+      dot.className = 'w-2 h-2 rounded-full bg-gray-400';
+      txt.textContent = s.status === 'completed' ? 'Completed' : s.status === 'error' ? 'Error' : 'Idle';
+      document.getElementById('btn-start').classList.remove('hidden');
+      document.getElementById('btn-stop').classList.add('hidden');
+    }
+  } catch(e) {}
+}
+
+// --- Admission Chart ---
+function renderAdmissionChart() {
+  const el = document.getElementById('chart-admission');
+  if (!el) return;
+  const chart = echarts.init(el);
+  const rounds = admissionHistory.map(h => 'R' + h.round);
+  const rates = admissionHistory.map(h => h.total > 0 ? (h.admitted / h.total * 100) : 0);
+  chart.setOption({
+    tooltip: { trigger: 'axis', formatter: '{b}: {c}%' },
+    grid: { left: 50, right: 20, top: 20, bottom: 30 },
+    xAxis: { type: 'category', data: rounds, axisLabel: { fontSize: 11 } },
+    yAxis: { type: 'value', max: 100, axisLabel: { formatter: '{value}%', fontSize: 11 } },
+    series: [{
+      type: 'bar', data: rates, barMaxWidth: 30,
+      itemStyle: { color: '#6366f1', borderRadius: [4, 4, 0, 0] }
+    }]
+  });
+}
+
+// --- Factor Library ---
+async function loadFactors() {
+  const res = await fetch(API + '/api/factors');
+  const data = await res.json();
+  factorData = data.factors || [];
+  renderFactorTable();
+}
+
+function sortFactors(field) {
+  if (sortField === field) sortDir *= -1;
+  else { sortField = field; sortDir = -1; }
+  renderFactorTable();
+}
+
+function renderFactorTable() {
+  const tbody = document.getElementById('factors-table');
+  const empty = document.getElementById('factors-empty');
+
+  if (!factorData.length) {
+    tbody.innerHTML = '';
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+
+  const sorted = [...factorData].sort((a, b) => {
+    const va = a[sortField] || 0, vb = b[sortField] || 0;
+    return (va - vb) * sortDir;
+  });
+
+  tbody.innerHTML = sorted.map((f, i) => `
+    <tr class="hover:bg-gray-50 cursor-pointer" onclick="showFactorDetail('${f.factor_id}')">
+      <td class="px-4 py-3 text-gray-400 text-xs">${i + 1}</td>
+      <td class="px-4 py-3 font-mono text-xs text-indigo-700 max-w-xs truncate" title="${f.expression}">${f.expression}</td>
+      <td class="px-4 py-3 text-right font-mono text-xs ${f.ic_mean > 0 ? 'text-emerald-600' : 'text-red-500'}">${f.ic_mean.toFixed(4)}</td>
+      <td class="px-4 py-3 text-right font-mono text-xs">${f.icir.toFixed(3)}</td>
+      <td class="px-4 py-3 text-right font-mono text-xs">${f.max_correlation.toFixed(3)}</td>
+      <td class="px-4 py-3 text-right font-mono text-xs">${f.turnover.toFixed(4)}</td>
+      <td class="px-4 py-3 text-xs text-gray-600 max-w-[200px] truncate" title="${f.logic_description}">${f.logic_description || '-'}</td>
+      <td class="px-4 py-3 text-center">
+        <button class="text-xs text-indigo-600 hover:underline" onclick="event.stopPropagation(); showFactorDetail('${f.factor_id}')">Detail</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+async function showFactorDetail(factorId) {
+  document.getElementById('factor-modal').classList.remove('hidden');
+  document.getElementById('factor-modal-body').innerHTML = '<div class="text-center text-gray-400 py-8">Loading analysis...</div>';
+
+  try {
+    const res = await fetch(API + '/api/factors/' + factorId + '/detail');
+    const data = await res.json();
+    const f = data.factor;
+    const a = data.analysis || {};
+
+    let html = `
+      <div class="mb-4 p-3 bg-indigo-50 rounded-lg font-mono text-sm text-indigo-800 break-all">${f.expression}</div>
+      <p class="text-sm text-gray-600 mb-4">${f.logic_description || ''}</p>
+      <div class="grid grid-cols-4 gap-3 mb-6">
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="text-lg font-bold ${f.ic_mean > 0 ? 'text-emerald-600' : 'text-red-500'}">${f.ic_mean.toFixed(4)}</div><div class="text-xs text-gray-500">IC Mean</div></div>
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="text-lg font-bold text-indigo-600">${f.icir.toFixed(3)}</div><div class="text-xs text-gray-500">ICIR</div></div>
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="text-lg font-bold text-gray-700">${f.max_correlation.toFixed(3)}</div><div class="text-xs text-gray-500">Max Corr</div></div>
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="text-lg font-bold text-gray-700">${f.turnover.toFixed(4)}</div><div class="text-xs text-gray-500">Turnover</div></div>
+      </div>
+    `;
+
+    if (a.ic_series) {
+      html += '<div id="modal-ic-chart" style="height:200px;" class="mb-4"></div>';
+    }
+    if (a.sharpe !== undefined) {
+      html += `<div class="grid grid-cols-3 gap-3">
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="font-bold">${(a.sharpe || 0).toFixed(2)}</div><div class="text-xs text-gray-500">Sharpe</div></div>
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="font-bold">${((a.max_drawdown || 0) * 100).toFixed(1)}%</div><div class="text-xs text-gray-500">Max DD</div></div>
+        <div class="bg-gray-50 rounded-lg p-3 text-center"><div class="font-bold">${((a.annual_return || 0) * 100).toFixed(1)}%</div><div class="text-xs text-gray-500">Ann. Ret</div></div>
+      </div>`;
+    }
+
+    document.getElementById('factor-modal-body').innerHTML = html;
+
+    if (a.ic_series) {
+      setTimeout(() => {
+        const chart = echarts.init(document.getElementById('modal-ic-chart'));
+        const icData = a.ic_series.filter(v => v !== null && !isNaN(v));
+        chart.setOption({
+          tooltip: { trigger: 'axis' },
+          grid: { left: 50, right: 20, top: 10, bottom: 30 },
+          xAxis: { type: 'category', data: icData.map((_, i) => i), show: false },
+          yAxis: { type: 'value', axisLabel: { fontSize: 11 } },
+          series: [{
+            type: 'bar', data: icData, barMaxWidth: 3,
+            itemStyle: { color: function(p) { return p.value >= 0 ? '#10b981' : '#ef4444'; } }
+          }]
+        });
+      }, 100);
+    }
+  } catch(e) {
+    document.getElementById('factor-modal-body').innerHTML = '<div class="text-red-500 text-center py-8">Failed to load: ' + e.message + '</div>';
+  }
+}
+
+function closeFactorModal() {
+  document.getElementById('factor-modal').classList.add('hidden');
+}
+
+// --- Backtest ---
+async function loadBacktestTargets() {
+  const sel = document.getElementById('bt-target');
+  sel.innerHTML = '<option value="">Full Library</option>';
+  try {
+    const res = await fetch(API + '/api/factors');
+    const data = await res.json();
+    (data.factors || []).forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.factor_id;
+      opt.textContent = f.expression.substring(0, 60);
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+}
+
+async function runBacktest() {
+  const btn = document.getElementById('btn-backtest');
+  btn.textContent = 'Running...'; btn.disabled = true;
+
+  try {
+    const body = {
+      factor_id: document.getElementById('bt-target').value || null,
+      method: document.getElementById('bt-method').value,
+    };
+    const res = await fetch(API + '/api/backtest', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (data.error) { alert(data.error); return; }
+
+    document.getElementById('bt-metrics').classList.remove('hidden');
+    document.getElementById('bt-sharpe').textContent = (data.sharpe || 0).toFixed(3);
+    document.getElementById('bt-annual').textContent = ((data.annual_return || 0) * 100).toFixed(1) + '%';
+    document.getElementById('bt-drawdown').textContent = ((data.max_drawdown || 0) * 100).toFixed(1) + '%';
+    document.getElementById('bt-win').textContent = ((data.win_ratio || 0) * 100).toFixed(1) + '%';
+    document.getElementById('bt-turnover').textContent = (data.turnover || 0).toFixed(4);
+
+    // Equity curve
+    const cum = data.cumulative_returns || [];
+    const eqChart = echarts.init(document.getElementById('chart-equity'));
+    eqChart.setOption({
+      tooltip: { trigger: 'axis' },
+      grid: { left: 60, right: 20, top: 20, bottom: 30 },
+      xAxis: { type: 'category', data: cum.map((_, i) => i), show: false },
+      yAxis: { type: 'value', axisLabel: { fontSize: 11 } },
+      series: [{
+        type: 'line', data: cum, showSymbol: false, lineStyle: { width: 2, color: '#6366f1' },
+        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1, colorStops: [{ offset: 0, color: 'rgba(99,102,241,0.15)' }, { offset: 1, color: 'rgba(99,102,241,0)' }] } }
+      }]
+    });
+
+    // Quintile bar chart
+    const gr = data.group_cumulative_returns || {};
+    const groups = Object.keys(gr).sort();
+    const qChart = echarts.init(document.getElementById('chart-quintile'));
+    qChart.setOption({
+      tooltip: { trigger: 'axis', formatter: '{b}: {c}%' },
+      grid: { left: 60, right: 20, top: 20, bottom: 30 },
+      xAxis: { type: 'category', data: groups, axisLabel: { fontSize: 12 } },
+      yAxis: { type: 'value', axisLabel: { formatter: '{value}%', fontSize: 11 } },
+      series: [{
+        type: 'bar', data: groups.map(g => (gr[g] * 100).toFixed(2)),
+        itemStyle: { color: function(p) { return p.dataIndex === 0 ? '#ef4444' : p.dataIndex === groups.length - 1 ? '#10b981' : '#94a3b8'; }, borderRadius: [4, 4, 0, 0] }
+      }]
+    });
+  } catch(e) {
+    alert('Backtest failed: ' + e.message);
+  } finally {
+    btn.textContent = 'Run Backtest'; btn.disabled = false;
+  }
+}
+
+// --- Experience Memory ---
+async function loadMemory() {
+  try {
+    const res = await fetch(API + '/api/memory');
+    const data = await res.json();
+
+    const ms = data.mining_state || {};
+    document.getElementById('memory-state').innerHTML = `
+      <div class="flex justify-between"><span class="text-gray-500">Library Size</span><span class="font-semibold">${ms.library_size || 0}</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">Total Candidates</span><span class="font-semibold">${ms.total_candidates || 0}</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">Total Admitted</span><span class="font-semibold">${ms.total_admitted || 0}</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">Recent Admission Rate</span><span class="font-semibold">${((ms.recent_admission_rate || 0) * 100).toFixed(0)}%</span></div>
+      <div class="flex justify-between"><span class="text-gray-500">Current Round</span><span class="font-semibold">${ms.current_round || 0}</span></div>
+      ${Object.entries(ms.domain_saturation || {}).map(([d, v]) =>
+        `<div class="flex items-center gap-2"><span class="text-gray-500 text-xs w-24">${d}</span><div class="flex-1 bg-gray-200 rounded-full h-2"><div class="bg-indigo-500 h-2 rounded-full" style="width:${v * 100}%"></div></div><span class="text-xs text-gray-500">${(v * 100).toFixed(0)}%</span></div>`
+      ).join('')}
+    `;
+
+    const insights = data.strategic_insights || [];
+    document.getElementById('memory-insights').innerHTML = insights.length
+      ? insights.map(i => `<div class="p-2 bg-amber-50 rounded-lg text-sm text-amber-800 border border-amber-100">${i.insight}</div>`).join('')
+      : '<div class="text-sm text-gray-400">No insights yet</div>';
+
+    const rec = data.recommended_directions || [];
+    document.getElementById('memory-recommended').innerHTML = rec.length
+      ? rec.map(r => `<div class="p-2 bg-emerald-50 rounded-lg text-xs text-emerald-800 border border-emerald-100"><div>${r.direction}</div><div class="text-emerald-500 mt-1">Success: ${r.success_rate || 'N/A'}</div></div>`).join('')
+      : '<div class="text-sm text-gray-400">None yet</div>';
+
+    const forb = data.forbidden_directions || [];
+    document.getElementById('memory-forbidden').innerHTML = forb.length
+      ? forb.map(f => `<div class="p-2 bg-red-50 rounded-lg text-xs text-red-800 border border-red-100">${f.direction}</div>`).join('')
+      : '<div class="text-sm text-gray-400">None yet</div>';
+  } catch(e) {
+    document.getElementById('memory-state').innerHTML = '<div class="text-red-500">Failed to load</div>';
+  }
+}
+
+// --- Init ---
+connectWS();
+pollStatus();
+setInterval(pollStatus, 5000);
+</script>
+</body>
+</html>
