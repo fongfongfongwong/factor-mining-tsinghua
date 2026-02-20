@@ -1,5 +1,8 @@
 """Data layer: A-share OHLCV data fetching and panel construction.
 
+All data cleaning uses **Polars** for performance (lazy scan, streaming pivot,
+zero-copy to numpy). Pandas is only used for AkShare API compatibility.
+
 Supports two modes:
 1. Load from existing parquet file (factor_investing/data/processed/)
 2. Fetch live via AkShare (fallback)
@@ -11,7 +14,13 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import pandas as pd
+import polars as pl
+
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    HAS_PANDAS = False
 
 try:
     import akshare as ak
@@ -57,136 +66,49 @@ def _load_panel_cache(path: Path) -> Optional[dict]:
 
 logger = logging.getLogger(__name__)
 
-# Path to existing factor_investing data
 _FACTOR_INVESTING_DATA = Path(__file__).resolve().parent.parent.parent / "factor_investing" / "data"
 _PROCESSED_DAILY = _FACTOR_INVESTING_DATA / "processed" / "daily_20180101_20241231.parquet"
 _RAW_DIR = _FACTOR_INVESTING_DATA / "raw"
 
 
-def _align_quarterly_to_daily(
-    df: pd.DataFrame,
-    date_col: str,
-    codes: list[str],
-    common_dates: list,
-    value_cols: list[str],
-    report_lag_days: int = 45,
-) -> dict[str, np.ndarray]:
-    """Align quarterly fundamental data to daily trade dates (point-in-time).
+# ---------------------------------------------------------------------------
+# Polars-based data cleaning
+# ---------------------------------------------------------------------------
 
-    For each (ts_code, trade_date), use the latest report with
-    end_date + report_lag_days <= trade_date (avoids look-ahead).
-    Returns dict of arrays (M, T). Uses merge_asof for speed.
+def _pl_pivot_to_numpy(
+    lf: pl.LazyFrame,
+    index_col: str,
+    columns_col: str,
+    values_col: str,
+    row_order: list,
+    col_order: list,
+) -> np.ndarray:
+    """Pivot a long-form LazyFrame into a (len(col_order), len(row_order)) numpy array.
+
+    Result shape is (M_stocks, T_dates) — stocks on axis 0, dates on axis 1.
     """
-    M = len(codes)
-    T = len(common_dates)
-    result = {col: np.full((M, T), np.nan) for col in value_cols}
+    df = (
+        lf
+        .filter(pl.col(index_col).is_in(row_order))
+        .filter(pl.col(columns_col).is_in(col_order))
+        .select([index_col, columns_col, values_col])
+        .collect()
+    )
+    pivoted = df.pivot(on=columns_col, index=index_col, values=values_col)
+    pivoted = pivoted.sort(index_col)
 
-    code_to_idx = {c: i for i, c in enumerate(codes)}
-    df = df.dropna(subset=[date_col]).copy()
-    df[date_col] = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
-    df = df.dropna(subset=[date_col])
-    df = df[df["ts_code"].isin(codes)].sort_values(date_col)
+    present_cols = [c for c in col_order if c in pivoted.columns]
+    missing_cols = [c for c in col_order if c not in pivoted.columns]
+    arr = pivoted.select(present_cols).to_numpy().astype(np.float64)
 
-    trade_df = pd.DataFrame({
-        "trade_date": pd.to_datetime([str(d).replace("-", "")[:8] for d in common_dates], format="%Y%m%d"),
-    })
-    trade_df["_t"] = range(len(trade_df))
-    trade_df["trade_date_lag"] = trade_df["trade_date"] - pd.Timedelta(days=report_lag_days)
+    if missing_cols:
+        full = np.full((len(col_order), len(row_order)), np.nan)
+        col_idx = {c: i for i, c in enumerate(col_order)}
+        for j, c in enumerate(present_cols):
+            full[col_idx[c], :] = arr[:, j] if j < arr.shape[1] else np.nan
+        return full
 
-    trade_sorted = trade_df.sort_values("trade_date_lag").copy()
-    for ts_code in codes:
-        sub = df[df["ts_code"] == ts_code][[date_col] + value_cols].copy()
-        if sub.empty:
-            continue
-        sub = sub.sort_values(date_col).rename(columns={date_col: "end_date"})
-        merged = pd.merge_asof(
-            trade_sorted,
-            sub,
-            left_on="trade_date_lag",
-            right_on="end_date",
-            direction="backward",
-        )
-        idx = code_to_idx[ts_code]
-        for col in value_cols:
-            if col in merged.columns:
-                vals = merged[col].values
-                vals = np.where(pd.notna(vals) & np.isfinite(vals), vals, np.nan)
-                result[col][idx, :] = vals
-
-    return result
-
-
-def _load_daily_basic_panel(
-    codes: list[str],
-    common_dates: list,
-) -> dict[str, np.ndarray]:
-    """Load daily_basic (total_mv, pe, pb, dv_ttm) and align to panel.
-
-    Concatenates all daily_basic_*.parquet files.
-    """
-    db_files = sorted(_RAW_DIR.glob("daily_basic*.parquet"))
-    if not db_files:
-        return {}
-    dfs = [pd.read_parquet(f) for f in db_files]
-    df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
-    if "trade_date" not in df.columns:
-        return {}
-
-    M = len(codes)
-    T = len(common_dates)
-    value_cols = [c for c in ["total_mv", "pe", "pb", "dv_ttm"] if c in df.columns]
-    if not value_cols:
-        return {}
-
-    df["trade_date"] = pd.to_numeric(df["trade_date"], errors="coerce")
-    df = df[df["ts_code"].isin(codes)]
-    dates_int = [int(str(d).replace("-", "")[:8]) for d in common_dates]
-
-    result = {}
-    for col in value_cols:
-        pt = df.pivot_table(index="trade_date", columns="ts_code", values=col)
-        pt = pt.reindex(index=dates_int, columns=codes)
-        result[col] = pt.values.T.astype(np.float64)
-
-    return result
-
-
-def _merge_fundamentals_into_panel(
-    panel: dict,
-    codes: list[str],
-    common_dates: list,
-) -> None:
-    """Load balance/income/daily_basic from factor_investing and merge into panel."""
-    balance_path = _RAW_DIR / "batch_balance_all.parquet"
-    income_path = _RAW_DIR / "batch_income_all.parquet"
-
-    if balance_path.exists():
-        balance = pd.read_parquet(balance_path)
-        bal_cols = [c for c in ["bvps", "roe_pct"] if c in balance.columns]
-        if bal_cols:
-            bal_arrays = _align_quarterly_to_daily(
-                balance, "end_date", codes, common_dates, bal_cols, report_lag_days=45
-            )
-            for k, arr in bal_arrays.items():
-                panel[k] = arr
-            logger.info(f"  Merged balance: {list(bal_arrays.keys())}")
-
-    if income_path.exists():
-        income = pd.read_parquet(income_path)
-        inc_cols = [c for c in ["basic_eps", "n_income", "revenue"] if c in income.columns]
-        if inc_cols:
-            inc_arrays = _align_quarterly_to_daily(
-                income, "end_date", codes, common_dates, inc_cols, report_lag_days=45
-            )
-            for k, arr in inc_arrays.items():
-                panel[k] = arr
-            logger.info(f"  Merged income: {list(inc_arrays.keys())}")
-
-    daily_basic = _load_daily_basic_panel(codes, common_dates)
-    for k, arr in daily_basic.items():
-        panel[k] = arr
-    if daily_basic:
-        logger.info(f"  Merged daily_basic: {list(daily_basic.keys())}")
+    return arr
 
 
 def build_panel_from_parquet(
@@ -195,18 +117,10 @@ def build_panel_from_parquet(
     min_days: int = 500,
     include_fundamentals: bool = False,
 ) -> dict[str, np.ndarray]:
-    """Build market panel directly from the factor_investing processed parquet.
+    """Build market panel from parquet using Polars for all data cleaning.
 
-    Args:
-        parquet_path: Path to the daily parquet file.
-        max_stocks: Maximum number of stocks to include.
-        min_days: Minimum trading days a stock must have to be included.
-        include_fundamentals: If True, merge balance/income/daily_basic from factor_investing/raw.
-
-    Returns:
-        Panel dict with keys: open, high, low, close, volume, amount, vwap, returns, codes, dates.
-        When include_fundamentals=True, adds: bvps, roe_pct, basic_eps, n_income, revenue,
-        total_mv, pe, pb, dv_ttm (when available).
+    Returns panel dict with keys: open, high, low, close, volume, amount,
+    vwap, returns, codes, dates. Optionally adds fundamental fields.
     """
     fund_suffix = "_fund" if include_fundamentals else ""
     cache_key = f"parquet_panel_{max_stocks}_{min_days}{fund_suffix}"
@@ -216,27 +130,38 @@ def build_panel_from_parquet(
         logger.info(f"Loaded cached panel (from local data) {cache_path}")
         return cached
 
-    logger.info(f"Using local data: {parquet_path}")
+    logger.info(f"Using local data (Polars): {parquet_path}")
     if not parquet_path.exists():
-        raise FileNotFoundError(f"Local data not found: {parquet_path}. Ensure factor_investing/data/processed/ exists.")
-    df = pd.read_parquet(parquet_path)
-    logger.info(f"Raw data: {len(df):,} rows, {df['ts_code'].nunique()} stocks")
+        raise FileNotFoundError(f"Local data not found: {parquet_path}")
 
-    # Count days per stock, keep only those with enough data
-    day_counts = df.groupby("ts_code")["trade_date"].count()
-    valid_stocks = day_counts[day_counts >= min_days].index.tolist()
+    lf = pl.scan_parquet(parquet_path)
+
+    # Count trading days per stock
+    day_counts = (
+        lf
+        .group_by("ts_code")
+        .agg(pl.col("trade_date").count().alias("n_days"))
+        .filter(pl.col("n_days") >= min_days)
+        .sort("n_days", descending=True)
+        .collect()
+    )
+    valid_stocks = day_counts["ts_code"].to_list()
     logger.info(f"Stocks with >= {min_days} days: {len(valid_stocks)}")
 
     if max_stocks and len(valid_stocks) > max_stocks:
-        # Prefer stocks with most data
-        valid_stocks = day_counts.loc[valid_stocks].nlargest(max_stocks).index.tolist()
+        valid_stocks = valid_stocks[:max_stocks]
 
-    df = df[df["ts_code"].isin(valid_stocks)].copy()
-
-    # Get common trading dates across all selected stocks
-    dates_per_stock = df.groupby("ts_code")["trade_date"].apply(set)
-    common_dates = set.intersection(*dates_per_stock.values)
-    common_dates = sorted(common_dates)
+    # Find common trading dates across selected stocks
+    dates_df = (
+        lf
+        .filter(pl.col("ts_code").is_in(valid_stocks))
+        .group_by("trade_date")
+        .agg(pl.col("ts_code").n_unique().alias("n_stocks"))
+        .filter(pl.col("n_stocks") == len(valid_stocks))
+        .sort("trade_date")
+        .collect()
+    )
+    common_dates = dates_df["trade_date"].to_list()
     logger.info(f"Common trading dates: {len(common_dates)}")
 
     if len(common_dates) < 60:
@@ -245,12 +170,17 @@ def build_panel_from_parquet(
     codes = sorted(valid_stocks)
     M = len(codes)
     T = len(common_dates)
-    logger.info(f"Building panel: {M} assets x {T} days")
+    common_dates_sorted = sorted(common_dates)
+    logger.info(f"Building panel (Polars): {M} assets x {T} days")
 
-    # Pivot each field
-    df_filtered = df[df["trade_date"].isin(common_dates)]
+    # Filter to valid stocks + common dates
+    filtered = (
+        lf
+        .filter(pl.col("ts_code").is_in(codes))
+        .filter(pl.col("trade_date").is_in(common_dates_sorted))
+    )
 
-    panel = {}
+    # Pivot each OHLCV field: result is (M, T) with stocks as rows, dates as cols
     field_map = {
         "open": "open",
         "high": "high",
@@ -260,11 +190,20 @@ def build_panel_from_parquet(
         "amount": "amount",
     }
 
+    panel = {}
     for panel_name, col_name in field_map.items():
-        pivot = df_filtered.pivot(index="trade_date", columns="ts_code", values=col_name)
-        pivot = pivot.sort_index()
-        pivot = pivot[codes]  # Ensure consistent column order
-        panel[panel_name] = pivot.values.T.astype(np.float64)  # (M, T)
+        df_piv = (
+            filtered
+            .select(["trade_date", "ts_code", col_name])
+            .collect()
+            .pivot(on="trade_date", index="ts_code", values=col_name)
+        )
+        # Ensure consistent row order (sorted codes)
+        df_piv = df_piv.sort("ts_code")
+        # Extract numeric columns in date-sorted order
+        date_cols = sorted([c for c in df_piv.columns if c != "ts_code"])
+        arr = df_piv.select(date_cols).to_numpy().astype(np.float64)
+        panel[panel_name] = arr
 
     # Derived fields
     close = panel["close"]
@@ -279,44 +218,147 @@ def build_panel_from_parquet(
     returns[:, 1:] = close[:, 1:] / close[:, :-1] - 1.0
     panel["returns"] = returns
 
-    # Strip the .SZ/.SH suffix for cleaner display
     clean_codes = [c.split(".")[0] if "." in c else c for c in codes]
     panel["codes"] = clean_codes
-    panel["dates"] = np.array(common_dates)
+    panel["dates"] = np.array(common_dates_sorted)
 
     if include_fundamentals and _RAW_DIR.exists():
-        logger.info("Merging fundamental data from factor_investing/raw ...")
-        _merge_fundamentals_into_panel(panel, codes, common_dates)
-
-    base_fields = list(field_map.keys()) + ["vwap", "returns"]
-    extra = [k for k in panel.keys() if k not in ("codes", "dates") and k not in base_fields]
-    logger.info(f"Panel built: {M} assets x {T} days, fields: {base_fields}{extra and [' + ' + str(extra) or '']}")
+        logger.info("Merging fundamental data (Polars) ...")
+        _merge_fundamentals_into_panel_pl(panel, codes, common_dates_sorted)
 
     _save_panel_cache(panel, cache_path)
+    logger.info(f"Panel built: {M} assets x {T} days")
     return panel
 
 
+def _merge_fundamentals_into_panel_pl(
+    panel: dict,
+    codes: list[str],
+    common_dates: list,
+) -> None:
+    """Merge balance/income/daily_basic into panel using Polars."""
+    M = len(codes)
+    T = len(common_dates)
+
+    # --- daily_basic ---
+    db_files = sorted(_RAW_DIR.glob("daily_basic*.parquet"))
+    if db_files:
+        lf = pl.concat([pl.scan_parquet(f) for f in db_files])
+        value_cols = [c for c in ["total_mv", "pe", "pb", "dv_ttm"]
+                      if c in lf.collect_schema().names()]
+        if value_cols:
+            dates_int = [int(str(d).replace("-", "")[:8]) for d in common_dates]
+            for col in value_cols:
+                try:
+                    df = (
+                        lf
+                        .filter(pl.col("ts_code").is_in(codes))
+                        .with_columns(pl.col("trade_date").cast(pl.Int64))
+                        .filter(pl.col("trade_date").is_in(dates_int))
+                        .select(["trade_date", "ts_code", col])
+                        .collect()
+                        .pivot(on="trade_date", index="ts_code", values=col)
+                        .sort("ts_code")
+                    )
+                    date_str_cols = sorted([c for c in df.columns if c != "ts_code"])
+                    arr = df.select(date_str_cols).to_numpy().astype(np.float64)
+                    if arr.shape == (M, T):
+                        panel[col] = arr
+                        logger.info(f"  Merged daily_basic: {col}")
+                except Exception as e:
+                    logger.warning(f"  Failed daily_basic {col}: {e}")
+
+    # --- quarterly fundamentals (balance, income) ---
+    for file_name, date_col, cols in [
+        ("batch_balance_all.parquet", "end_date", ["bvps", "roe_pct"]),
+        ("batch_income_all.parquet", "end_date", ["basic_eps", "n_income", "revenue"]),
+    ]:
+        fpath = _RAW_DIR / file_name
+        if not fpath.exists():
+            continue
+        try:
+            df = pl.read_parquet(fpath)
+            avail_cols = [c for c in cols if c in df.columns]
+            if not avail_cols:
+                continue
+            # Point-in-time: use report_lag_days=45
+            _align_quarterly_pl(df, date_col, codes, common_dates, avail_cols, panel, report_lag_days=45)
+        except Exception as e:
+            logger.warning(f"  Failed {file_name}: {e}")
+
+
+def _align_quarterly_pl(
+    df: pl.DataFrame,
+    date_col: str,
+    codes: list[str],
+    common_dates: list,
+    value_cols: list[str],
+    panel: dict,
+    report_lag_days: int = 45,
+) -> None:
+    """Align quarterly data to daily dates using Polars asof join (point-in-time)."""
+    M = len(codes)
+    T = len(common_dates)
+    code_to_idx = {c: i for i, c in enumerate(codes)}
+
+    df = df.filter(pl.col("ts_code").is_in(codes))
+    df = df.with_columns(
+        pl.col(date_col).cast(pl.Utf8).str.slice(0, 8).str.to_datetime("%Y%m%d", strict=False).alias("report_date")
+    ).drop_nulls("report_date")
+
+    trade_dates = pl.DataFrame({
+        "trade_date": [
+            pl.Series([str(d).replace("-", "")[:8] for d in common_dates])
+            .str.to_datetime("%Y%m%d", strict=False)
+        ][0]
+    }).with_columns(
+        (pl.col("trade_date") - pl.duration(days=report_lag_days)).alias("cutoff")
+    )
+
+    for ts_code in codes:
+        sub = (
+            df.filter(pl.col("ts_code") == ts_code)
+            .select(["report_date"] + value_cols)
+            .sort("report_date")
+        )
+        if sub.is_empty():
+            continue
+        merged = trade_dates.join_asof(
+            sub,
+            left_on="cutoff",
+            right_on="report_date",
+            strategy="backward",
+        )
+        idx = code_to_idx[ts_code]
+        for col in value_cols:
+            if col in merged.columns:
+                vals = merged[col].to_numpy().astype(np.float64)
+                if col not in panel:
+                    panel[col] = np.full((M, T), np.nan)
+                panel[col][idx, :] = vals
+
+    for col in value_cols:
+        if col in panel:
+            logger.info(f"  Merged quarterly: {col}")
+
+
+# ---------------------------------------------------------------------------
+# AkShare fallback (uses pandas for API compat, but cleaning still in polars)
+# ---------------------------------------------------------------------------
+
 def get_stock_list(index: str = "000300") -> list[str]:
-    """Get constituent stock codes for a given index.
-
-    Args:
-        index: Index code. '000300' for CSI 300, '000905' for CSI 500.
-
-    Returns:
-        List of 6-digit stock codes (e.g. ['600519', '000858', ...]).
-    """
+    """Get constituent stock codes for a given index."""
     cache_path = DATA_CACHE_DIR / f"stock_list_{index}.json"
     if cache_path.exists():
         with open(cache_path, "r") as f:
             return json.load(f)
 
     if not HAS_AKSHARE:
-        logger.error("akshare not installed. Install with: pip install akshare")
+        logger.error("akshare not installed")
         return []
 
     try:
         df = ak.index_stock_cons_csindex(symbol=index)
-
         code_col = None
         for col in df.columns:
             if "代码" in str(col) or "code" in str(col).lower() or "成分券代码" in str(col):
@@ -324,17 +366,12 @@ def get_stock_list(index: str = "000300") -> list[str]:
                 break
         if code_col is None:
             code_col = df.columns[0]
-
         codes = df[code_col].astype(str).str.zfill(6).tolist()
-
         with open(cache_path, "w") as f:
             json.dump(codes, f)
-
-        logger.info(f"Fetched {len(codes)} stocks for index {index}")
         return codes
-
     except Exception as e:
-        logger.error(f"Failed to fetch stock list for {index}: {e}")
+        logger.error(f"Failed to fetch stock list: {e}")
         return []
 
 
@@ -342,83 +379,48 @@ def get_historical_data(
     code: str,
     start: str = DATA_START,
     end: str = DATA_END,
-) -> Optional[pd.DataFrame]:
-    """Get historical daily OHLCV data for a single stock.
-
-    Args:
-        code: 6-digit stock code.
-        start: Start date 'YYYY-MM-DD'.
-        end: End date 'YYYY-MM-DD'.
-
-    Returns:
-        DataFrame with columns [date, open, high, low, close, volume, amount]
-        indexed by date, or None on failure.
-    """
+) -> Optional["pd.DataFrame"]:
+    """Get historical data for a single stock (AkShare, returns pandas for compat)."""
+    if not HAS_PANDAS:
+        return None
     cache_path = DATA_CACHE_DIR / f"hist_{code}_{start}_{end}.parquet"
     if cache_path.exists():
         return pd.read_parquet(cache_path)
-
     if not HAS_AKSHARE:
-        logger.error("akshare not installed. Install with: pip install akshare")
         return None
-
     try:
-        start_fmt = start.replace("-", "")
-        end_fmt = end.replace("-", "")
-
         df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            start_date=start_fmt,
-            end_date=end_fmt,
+            symbol=code, period="daily",
+            start_date=start.replace("-", ""),
+            end_date=end.replace("-", ""),
             adjust="qfq",
         )
-
         if df is None or df.empty:
-            logger.warning(f"No data for {code}")
             return None
-
         col_map = {}
         for col in df.columns:
-            col_lower = str(col).lower()
-            if "日期" in str(col) or "date" in col_lower:
-                col_map[col] = "date"
-            elif "开盘" in str(col) or col_lower == "open":
-                col_map[col] = "open"
-            elif "最高" in str(col) or col_lower == "high":
-                col_map[col] = "high"
-            elif "最低" in str(col) or col_lower == "low":
-                col_map[col] = "low"
-            elif "收盘" in str(col) or col_lower == "close":
-                col_map[col] = "close"
-            elif "成交量" in str(col) or col_lower == "volume":
-                col_map[col] = "volume"
-            elif "成交额" in str(col) or col_lower == "amount":
-                col_map[col] = "amount"
-
+            cl = str(col).lower()
+            if "日期" in str(col) or "date" in cl: col_map[col] = "date"
+            elif "开盘" in str(col) or cl == "open": col_map[col] = "open"
+            elif "最高" in str(col) or cl == "high": col_map[col] = "high"
+            elif "最低" in str(col) or cl == "low": col_map[col] = "low"
+            elif "收盘" in str(col) or cl == "close": col_map[col] = "close"
+            elif "成交量" in str(col) or cl == "volume": col_map[col] = "volume"
+            elif "成交额" in str(col) or cl == "amount": col_map[col] = "amount"
         df = df.rename(columns=col_map)
-
-        required = ["date", "open", "high", "low", "close", "volume"]
-        if not all(c in df.columns for c in required):
-            logger.warning(f"Missing columns for {code}: {df.columns.tolist()}")
+        if "date" not in df.columns:
             return None
-
         df["date"] = pd.to_datetime(df["date"])
         df = df.set_index("date").sort_index()
-
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
+        for c in ["open", "high", "low", "close", "volume"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
         if "amount" not in df.columns:
             df["amount"] = df["close"] * df["volume"]
-        else:
-            df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
-
         df.to_parquet(cache_path)
         return df
-
     except Exception as e:
-        logger.warning(f"Failed to fetch data for {code}: {e}")
+        logger.warning(f"Failed {code}: {e}")
         return None
 
 
@@ -428,19 +430,7 @@ def build_market_panel(
     end: str = DATA_END,
     max_stocks: Optional[int] = None,
 ) -> dict[str, np.ndarray]:
-    """Build the market data panel for factor mining.
-
-    Args:
-        codes: List of stock codes.
-        start: Start date.
-        end: End date.
-        max_stocks: Cap on number of stocks (for fast screening).
-
-    Returns:
-        Dict mapping feature names to 2D arrays of shape (M, T) where
-        M = number of assets and T = number of trading days.
-        Also includes 'codes' (list) and 'dates' (array).
-    """
+    """Build panel from per-stock AkShare fetches (fallback path)."""
     cache_key = f"panel_{len(codes)}_{max_stocks}_{start}_{end}"
     cache_path = DATA_CACHE_DIR / cache_key
     cached = _load_panel_cache(cache_path)
@@ -459,47 +449,32 @@ def build_market_panel(
     if not all_data:
         raise ValueError("No valid stock data fetched")
 
-    logger.info(f"Fetched data for {len(all_data)} / {len(codes)} stocks")
-
     common_dates = None
     for code, df in all_data.items():
         idx = set(df.index)
-        if common_dates is None:
-            common_dates = idx
-        else:
-            common_dates = common_dates & idx
-
+        common_dates = idx if common_dates is None else common_dates & idx
     common_dates = sorted(common_dates)
     if len(common_dates) < 60:
-        raise ValueError(f"Only {len(common_dates)} common trading days, need >= 60")
+        raise ValueError(f"Only {len(common_dates)} common days")
 
     valid_codes = sorted(all_data.keys())
-    M = len(valid_codes)
-    T = len(common_dates)
-    logger.info(f"Panel: {M} assets x {T} trading days")
+    M, T = len(valid_codes), len(common_dates)
 
     panel = {}
-    base_fields = ["open", "high", "low", "close", "volume", "amount"]
-    for field in base_fields:
+    for field in ["open", "high", "low", "close", "volume", "amount"]:
         arr = np.full((M, T), np.nan)
         for i, code in enumerate(valid_codes):
             df = all_data[code]
-            vals = df.loc[common_dates, field].values if field in df.columns else np.full(T, np.nan)
-            arr[i, :] = vals
+            if field in df.columns:
+                arr[i, :] = df.loc[common_dates, field].values
         panel[field] = arr
 
-    close = panel["close"]
-    volume = panel["volume"]
-    amount = panel["amount"]
-
+    close, volume, amount = panel["close"], panel["volume"], panel["amount"]
     with np.errstate(divide="ignore", invalid="ignore"):
-        vwap = np.where(volume > 0, amount / volume, close)
-    panel["vwap"] = vwap
-
+        panel["vwap"] = np.where(volume > 0, amount / volume, close)
     returns = np.full_like(close, np.nan)
     returns[:, 1:] = close[:, 1:] / close[:, :-1] - 1.0
     panel["returns"] = returns
-
     panel["codes"] = valid_codes
     panel["dates"] = np.array(common_dates)
 
@@ -511,15 +486,7 @@ def calculate_returns(
     panel: dict[str, np.ndarray],
     horizon: int = 1,
 ) -> np.ndarray:
-    """Compute forward returns for IC calculation.
-
-    Args:
-        panel: Market data panel from build_market_panel.
-        horizon: Number of days ahead for return calculation.
-
-    Returns:
-        2D array (M, T) of forward returns. Last `horizon` columns are NaN.
-    """
+    """Compute forward returns for IC calculation."""
     close = panel["close"]
     M, T = close.shape
     fwd = np.full((M, T), np.nan)
