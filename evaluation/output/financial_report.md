@@ -361,7 +361,35 @@ Total events: **115**
 
 ---
 
-## 8. Research References
+## 8. Model Comparison: IC-Weighted vs AlphaPROBE Adaptive
+
+Both methods use 2,211 signals + DD Cap 5%. Backtest period: 2018-2024, 300 stocks.
+
+| Metric | IC-Weighted (MLX GPU) | AlphaPROBE Adaptive | Winner |
+|--------|----------------------|--------------------|----|
+| **Sharpe** | **3.626** | 2.736 | IC-Weighted |
+| **Ann Return** | **72.81%** | 36.10% | IC-Weighted |
+| **Max DD** | -5.00% | **-4.98%** | AlphaPROBE |
+| **Win Rate** | **57.3%** | 54.8% | IC-Weighted |
+| **Turnover** | **0.23** | 1.70 | IC-Weighted |
+| Compute Time | **8.2s** (MLX GPU) | 228.9s | IC-Weighted |
+
+### Analysis
+
+- **IC-Weighted outperforms on this dataset** because the 2,211 factors are already well-diversified (mined from 22K candidates) and the signed IC combination captures both positive and negative IC factors effectively.
+- **AlphaPROBE Adaptive** selects only 30 factors per step via Bayesian retrieval + ridge regression. This is more robust out-of-sample when factors are noisy, but with 2K+ well-screened factors the simpler IC-weighted approach wins.
+- **AlphaPROBE's turnover is 7x higher** because ridge weights change at each refit, causing position churn.
+- **Key insight**: AlphaPROBE's DAG-based generation + Bayesian retrieval is best suited for the **factor mining** stage (which we already used exhaustively), while IC-weighted combination is better for the **signal aggregation** stage when factor quality is pre-validated.
+
+### Infrastructure: Apple MLX GPU Acceleration
+
+- **MLX (Metal GPU)** installed on M2 Max 96GB — batch IC computation for 2,211 factors: **6 seconds** (vs ~4 minutes CPU = **40x speedup**)
+- Ridge regression solver via `mx.linalg.solve` on GPU
+- Chunked processing to stay within unified memory budget
+
+---
+
+## 9. Research References
 
 ### Alpha Mining / Factor Generation
 

@@ -171,23 +171,60 @@ def run_library_backtest(
     target_vol_ann: Optional[float] = None,
     max_dd_target: Optional[float] = None,
     vol_lookback: int = 20,
+    adaptive_top_k: int = 50,
+    adaptive_lookback: int = 120,
+    adaptive_refit: int = 5,
 ) -> dict:
     """Combined factor library backtest.
 
     Args:
         signals: Dict mapping expression -> signal array (M, T).
         returns: Forward returns (M, T).
-        method: Combination method ('equal', 'ic_weighted', 'icir_weighted').
+        method: 'equal', 'ic_weighted', 'icir_weighted', or 'adaptive' (AlphaPROBE-style).
         ic_series_map: Optional pre-computed IC series per factor.
         target_vol_ann: If set, volatility targeting (e.g. 0.05 = 5% annual vol).
         max_dd_target: If set, cap drawdown (e.g. 0.05 = 5%).
         vol_lookback: Lookback for vol targeting.
+        adaptive_top_k: (adaptive only) number of factors to select per step.
+        adaptive_lookback: (adaptive only) rolling window for ridge regression.
+        adaptive_refit: (adaptive only) refit interval in days.
 
     Returns:
         Backtest result dict.
     """
     if not signals:
         return {"error": "No signals provided"}
+
+    # Try MLX GPU acceleration for IC-weighted combination
+    if method == "ic_weighted":
+        try:
+            from .mlx_accel import mlx_ic_weighted_combine, HAS_MLX
+            if HAS_MLX and len(signals) > 50:
+                logger.info(f"Using MLX GPU for IC-weighted combination ({len(signals)} signals)")
+                combined = mlx_ic_weighted_combine(signals, returns)
+                return run_factor_backtest(
+                    combined, returns,
+                    target_vol_ann=target_vol_ann,
+                    max_dd_target=max_dd_target,
+                    vol_lookback=vol_lookback,
+                )
+        except Exception as e:
+            logger.warning(f"MLX acceleration failed, falling back to CPU: {e}")
+
+    if method == "adaptive":
+        from .adaptive_combiner import adaptive_combine_signals
+        combined = adaptive_combine_signals(
+            signals, returns,
+            lookback=adaptive_lookback,
+            top_k=adaptive_top_k,
+            refit_interval=adaptive_refit,
+        )
+        return run_factor_backtest(
+            combined, returns,
+            target_vol_ann=target_vol_ann,
+            max_dd_target=max_dd_target,
+            vol_lookback=vol_lookback,
+        )
 
     expressions = list(signals.keys())
     signal_list = [signals[e] for e in expressions]
