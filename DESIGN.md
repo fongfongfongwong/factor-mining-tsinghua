@@ -1043,7 +1043,7 @@ Based on [FactorMiner (arXiv:2602.14670)](https://arxiv.org/abs/2602.14670) and 
 |----------|--------|-------------|--------|
 | AlphaAgent (AST-regularized exploration) | arXiv:2502.16789 | 0.05+ | Reviewed |
 | QuantaAlpha (evolutionary operations) | arXiv:2602.07085 | 0.15 (GPT-5.2, CSI300) | Reviewed |
-| AlphaPROBE (DAG-based navigation) | arXiv:2602.11917 | 0.06+ | Reviewed |
+| AlphaPROBE (DAG-based navigation) | [arXiv:2602.11917](https://arxiv.org/abs/2602.11917) / [Code](https://github.com/gta0804/AlphaPROBE) | 0.06+ | Reviewed |
 | Hybrid LLM approach | Frontiers CS 2025 | 0.0515 (+75% over baseline) | Reviewed |
 | DoubleEnsemble | Local factor_investing | 0.0521 (Alpha158) | Available |
 | HIST (heterogeneous info) | Local factor_investing | 0.0522 (Alpha360) | Available |
@@ -1107,11 +1107,7 @@ Target:                         |IC| >= 0.08           ICIR >= 1.0    IC+% >= 75
 
 #### Next Steps (priority order)
 
-- [ ] **Integrate AlphaPROBE** (arXiv:2602.11917, PKU/Zhengren Quant):
-  DAG-based alpha mining with Bayesian seed retrieval + DAG-aware generation.
-  Reframes factor discovery as navigation on a Directed Acyclic Graph —
-  exploits global evolutionary topology for non-redundant, diverse alpha generation.
-  Paper: https://arxiv.org/abs/2602.11917 | Code: https://github.com/gta0804/AlphaPROBE
+- [ ] Mine more factors via Ralph Loop (target 100+ mined factors for richer combiner input)
 - [ ] Integrate DoubleEnsemble from factor_investing (sample reweighting + feature subspacing)
 - [ ] Add regime-aware weighting (MarketStateDetector from factor_investing)
 - [ ] Multi-horizon IC (1d, 5d, 10d, 20d) for factor stability assessment
@@ -1130,18 +1126,5 @@ Target:                         |IC| >= 0.08           ICIR >= 1.0    IC+% >= 75
 
 ---
 
-### Key References (Alpha Mining)
-
-| Paper | Year | Method | Key Result |
-|-------|------|--------|------------|
-| **AlphaPROBE** (arXiv:2602.11917) | 2026 | Bayesian retrieval + DAG-aware evolution | Outperforms 8 baselines on CSI300/500/1000 |
-| **QuantaAlpha** (arXiv:2602.07085) | 2026 | Evolutionary LLM-driven mining | IC=0.1501, ARR=27.75% on CSI300 |
-| **AlphaForge** (AAAI 2025) | 2024 | Generative-predictive NN + dynamic combination | Enhanced portfolio returns vs baselines |
-| **Gu, Kelly, Xiu** (RFS 2020) | 2020 | ML asset pricing (tree + NN) | 2x performance over linear models |
-| **WorldQuant 101** | 2015 | 101 formulaic alphas | Avg pairwise corr 15.9% |
-| **Harvey, Liu, Zhu** (RFS 2016) | 2016 | Factor Zoo / multiple testing | 27-53% false discovery in 296 factors |
-
----
-
-*Document updated: 2026-02-20*
-*FactorMiner v2.0.0 -- 2211 signals, Sharpe=3.625, Ann Return=72.79%, Max DD=-5.00%*
+*Document updated: 2026-02-19*
+*FactorMiner v1.2.0 -- IC = +0.0544, ICIR = +0.517, Production Candidate*

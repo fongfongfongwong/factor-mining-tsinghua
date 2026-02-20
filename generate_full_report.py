@@ -457,12 +457,38 @@ def main():
     w("| `monthly_pnl_rmb.png` | Monthly P&L bars |")
     w()
 
+    # === Research References ===
+    w("---")
+    w()
+    w("## 8. Research References")
+    w()
+    w("### Alpha Mining / Factor Generation")
+    w()
+    w("| Paper | Link | Key Contribution |")
+    w("|-------|------|-----------------|")
+    w("| **AlphaPROBE** (Guo et al., PKU + Zhengren Quant, 2026) | [arXiv:2602.11917](https://arxiv.org/abs/2602.11917) / [Code](https://github.com/gta0804/AlphaPROBE) | DAG-based factor mining with Bayesian retriever + multi-agent generator |")
+    w("| **QuantaAlpha** (2026) | [arXiv:2602.07085](https://arxiv.org/abs/2602.07085) | Evolutionary LLM-driven alpha mining, IC=0.1501 on CSI300 |")
+    w("| **AlphaForge** (AAAI 2025) | [arXiv:2406.18394](https://arxiv.org/abs/2406.18394) | Generative-predictive NN for formulaic alpha diversity |")
+    w("| **FactorMiner** (Tsinghua, 2026) | [arXiv:2602.14670](https://arxiv.org/abs/2602.14670) | LLM-driven Ralph Loop (our system's inspiration) |")
+    w("| **Gu, Kelly, Xiu** (RFS 2020) | [DOI](https://academic.oup.com/rfs/article/33/5/2223/5758276) | Empirical Asset Pricing via ML |")
+    w("| **WorldQuant 101 Alphas** (2015) | [arXiv:1601.00991](https://arxiv.org/abs/1601.00991) | 101 formulaic alphas |")
+    w()
+    w("### Risk & Evaluation")
+    w()
+    w("| Paper | Link | Key Contribution |")
+    w("|-------|------|-----------------|")
+    w("| **Harvey, Liu, Zhu** (RFS 2016) | SSRN 2326253 | Factor Zoo — t>3 for new factors |")
+    w("| **Deflated Sharpe Ratio** (Bailey et al.) | SSRN 2460551 | Corrects selection bias in backtest Sharpe |")
+    w("| **Almgren & Chriss** (2001) | J. Risk 3:5-40 | Optimal execution / market impact model |")
+    w("| **López de Prado** (2018) | Wiley | Purged K-Fold + Embargo for time-series CV |")
+    w()
+
     # Write
     with open(report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(L))
 
     logger.info(f"Report written: {report_path}")
-    logger.info(f"Sections: 0-Executive Summary, 1-Factors, 2-Features, 3-Beta, 4-Returns, 5-P&L, 6-Drawdown, 7-Charts")
+    logger.info(f"Sections: 0-Executive, 1-Factors, 2-Features, 3-Beta, 4-Returns, 5-P&L, 6-Drawdown, 7-Charts, 8-References")
     print(f"\n=== DONE: {report_path} ===")
 
 

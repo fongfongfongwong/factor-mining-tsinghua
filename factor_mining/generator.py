@@ -5,8 +5,11 @@ screens them via IC, HLZ, OOS, and correlation dedup, then returns survivors.
 
 Research basis:
 - QuantaAlpha (arXiv:2602.07085): IC=0.1501 via evolutionary LLM + diversity
-- LightGBM + 101 factors: IC=0.153 on 2893 A-shares
+- AlphaPROBE (arXiv:2602.11917): DAG-based principled evolution + Bayesian retrieval
+  Paper: https://arxiv.org/abs/2602.11917
+  Code:  https://github.com/gta0804/AlphaPROBE
 - AlphaForge (AAAI 2025): generative-predictive NN for factor diversity
+- LightGBM + 101 factors: IC=0.153 on 2893 A-shares
 - Key insight: IC>=0.1 requires 100+ diverse factors + non-linear combination
 """
 

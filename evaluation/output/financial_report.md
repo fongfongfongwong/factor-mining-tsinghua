@@ -29,21 +29,7 @@
 
 ## 1. Factor Analysis (All Mined Factors)
 
-### 1.1 Research Basis
-
-Our factor mining approach draws on recent advances in automated alpha discovery:
-
-| Paper | Method | Key Contribution |
-|-------|--------|-----------------|
-| **AlphaPROBE** (arXiv:2602.11917, PKU/Zhengren Quant, 2026) | Bayesian retrieval + DAG-aware evolution | Reframes alpha mining as DAG navigation; outperforms 8 baselines on CSI300/500/1000. [Paper](https://arxiv.org/abs/2602.11917) \| [Code](https://github.com/gta0804/AlphaPROBE) |
-| **QuantaAlpha** (arXiv:2602.07085, 2026) | Evolutionary LLM-driven mining | IC=0.1501, ARR=27.75% on CSI300 |
-| **AlphaForge** (AAAI 2025) | Generative-predictive NN + dynamic combination | Enhanced portfolio returns |
-| **Gu, Kelly, Xiu** (RFS 2020) | ML asset pricing | Tree + NN dominate; momentum/liquidity/vol are key |
-| **WorldQuant 101** (2015) | 101 formulaic alphas | Avg pairwise corr 15.9% |
-
-Our current system uses exhaustive depth-3 formulaic generation with IC-weighted signed combination. Future work will integrate AlphaPROBE's DAG-aware evolutionary approach for improved diversity and efficiency.
-
-### 1.2 Mined Factor Universe
+### 1.1 Mined Factor Universe
 
 - **Candidates generated**: 22,110 (depth-3 formulaic alpha)
 - **Passed IC > 0.005**: 19,618
@@ -59,7 +45,7 @@ Our current system uses exhaustive depth-3 formulaic generation with IC-weighted
 | Min IC | -0.0802 |
 | Median \|IC\| | 0.0207 |
 
-### 1.3 Top 50 Factors by |IC| (Used in Model)
+### 1.2 Top 50 Factors by |IC| (Used in Model)
 
 | # | Expression | IC Mean | ICIR |
 |---|-----------|---------|------|
@@ -114,7 +100,7 @@ Our current system uses exhaustive depth-3 formulaic generation with IC-weighted
 | 49 | `cs_rank(ts_sum(div(high, low), 5))` | -0.0665 | -0.381 |
 | 50 | `ts_mean(div(high, low), 5)` | -0.0665 | -0.381 |
 
-### 1.4 Factor IC Summary (Model Signals)
+### 1.3 Factor IC Summary (Model Signals)
 
 - Total signals in model: **2211**
 - Positive IC: 351 (15.9%)
@@ -372,3 +358,28 @@ Total events: **115**
 | `rolling_sharpe_63d.png` | 63-day rolling Sharpe |
 | `rolling_vol_21d.png` | 21-day rolling annualized vol |
 | `monthly_pnl_rmb.png` | Monthly P&L bars |
+
+---
+
+## 8. Research References
+
+### Alpha Mining / Factor Generation
+
+| Paper | Link | Key Contribution |
+|-------|------|-----------------|
+| **AlphaPROBE** (Guo et al., PKU + Zhengren Quant, 2026) | [arXiv:2602.11917](https://arxiv.org/abs/2602.11917) / [Code](https://github.com/gta0804/AlphaPROBE) | DAG-based factor mining with Bayesian retriever + multi-agent generator; principled evolution avoiding redundant search |
+| **QuantaAlpha** (2026) | [arXiv:2602.07085](https://arxiv.org/abs/2602.07085) | Evolutionary LLM-driven alpha mining, IC=0.1501 on CSI300, 27.75% ann return |
+| **AlphaForge** (AAAI 2025) | [arXiv:2406.18394](https://arxiv.org/abs/2406.18394) | Generative-predictive NN for formulaic alpha factor diversity |
+| **FactorMiner** (Tsinghua, 2026) | [arXiv:2602.14670](https://arxiv.org/abs/2602.14670) | LLM-driven Ralph Loop for factor mining (our system's inspiration) |
+| **Gu, Kelly, Xiu** (RFS 2020) | [DOI](https://academic.oup.com/rfs/article/33/5/2223/5758276) | Empirical Asset Pricing via ML — tree models + NNs dominate |
+| **WorldQuant 101 Alphas** (2015) | [arXiv:1601.00991](https://arxiv.org/abs/1601.00991) | 101 formulaic alphas, avg pairwise corr 15.9% |
+
+### Risk & Evaluation
+
+| Paper | Link | Key Contribution |
+|-------|------|-----------------|
+| **Harvey, Liu, Zhu** (RFS 2016) | SSRN 2326253 | Factor Zoo — t>3 for new factors, 27-53% false discoveries |
+| **Deflated Sharpe Ratio** (Bailey et al.) | SSRN 2460551 | Corrects selection bias + non-normality in backtest Sharpe |
+| **Probability of Backtest Overfitting** | SSRN 2326253 | MinBTL framework — max 45 trials on 5yr data |
+| **Almgren & Chriss** (2001) | J. Risk 3:5-40 | Optimal execution / market impact model |
+| **López de Prado** (2018) | Wiley | Purged K-Fold + Embargo for time-series CV |
