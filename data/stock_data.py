@@ -5,7 +5,7 @@ Supports two modes:
 2. Fetch live via AkShare (fallback)
 """
 
-import pickle
+import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -13,19 +13,187 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+try:
+    import akshare as ak
+    HAS_AKSHARE = True
+except ImportError:
+    HAS_AKSHARE = False
+
 from config import DATA_CACHE_DIR, DATA_START, DATA_END, DATA_FEATURES
+
+
+def _save_panel_cache(panel: dict, path: Path):
+    """Save panel to disk using numpy .npz (safe, no pickle RCE risk)."""
+    arrays = {}
+    meta = {}
+    for k, v in panel.items():
+        if isinstance(v, np.ndarray):
+            arrays[k] = v
+        elif isinstance(v, list):
+            meta[k] = v
+        else:
+            meta[k] = v
+    np.savez_compressed(path.with_suffix(".npz"), **arrays)
+    meta_path = path.with_suffix(".meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, default=str)
+
+
+def _load_panel_cache(path: Path) -> Optional[dict]:
+    """Load panel from .npz + .meta.json cache."""
+    npz_path = path.with_suffix(".npz")
+    meta_path = path.with_suffix(".meta.json")
+    if not npz_path.exists():
+        return None
+    try:
+        data = dict(np.load(npz_path, allow_pickle=False))
+        if meta_path.exists():
+            with open(meta_path, "r") as f:
+                meta = json.load(f)
+            data.update(meta)
+        return data
+    except Exception:
+        return None
 
 logger = logging.getLogger(__name__)
 
 # Path to existing factor_investing data
 _FACTOR_INVESTING_DATA = Path(__file__).resolve().parent.parent.parent / "factor_investing" / "data"
 _PROCESSED_DAILY = _FACTOR_INVESTING_DATA / "processed" / "daily_20180101_20241231.parquet"
+_RAW_DIR = _FACTOR_INVESTING_DATA / "raw"
+
+
+def _align_quarterly_to_daily(
+    df: pd.DataFrame,
+    date_col: str,
+    codes: list[str],
+    common_dates: list,
+    value_cols: list[str],
+    report_lag_days: int = 45,
+) -> dict[str, np.ndarray]:
+    """Align quarterly fundamental data to daily trade dates (point-in-time).
+
+    For each (ts_code, trade_date), use the latest report with
+    end_date + report_lag_days <= trade_date (avoids look-ahead).
+    Returns dict of arrays (M, T). Uses merge_asof for speed.
+    """
+    M = len(codes)
+    T = len(common_dates)
+    result = {col: np.full((M, T), np.nan) for col in value_cols}
+
+    code_to_idx = {c: i for i, c in enumerate(codes)}
+    df = df.dropna(subset=[date_col]).copy()
+    df[date_col] = pd.to_datetime(df[date_col].astype(str), format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=[date_col])
+    df = df[df["ts_code"].isin(codes)].sort_values(date_col)
+
+    trade_df = pd.DataFrame({
+        "trade_date": pd.to_datetime([str(d).replace("-", "")[:8] for d in common_dates], format="%Y%m%d"),
+    })
+    trade_df["_t"] = range(len(trade_df))
+    trade_df["trade_date_lag"] = trade_df["trade_date"] - pd.Timedelta(days=report_lag_days)
+
+    trade_sorted = trade_df.sort_values("trade_date_lag").copy()
+    for ts_code in codes:
+        sub = df[df["ts_code"] == ts_code][[date_col] + value_cols].copy()
+        if sub.empty:
+            continue
+        sub = sub.sort_values(date_col).rename(columns={date_col: "end_date"})
+        merged = pd.merge_asof(
+            trade_sorted,
+            sub,
+            left_on="trade_date_lag",
+            right_on="end_date",
+            direction="backward",
+        )
+        idx = code_to_idx[ts_code]
+        for col in value_cols:
+            if col in merged.columns:
+                vals = merged[col].values
+                vals = np.where(pd.notna(vals) & np.isfinite(vals), vals, np.nan)
+                result[col][idx, :] = vals
+
+    return result
+
+
+def _load_daily_basic_panel(
+    codes: list[str],
+    common_dates: list,
+) -> dict[str, np.ndarray]:
+    """Load daily_basic (total_mv, pe, pb, dv_ttm) and align to panel.
+
+    Concatenates all daily_basic_*.parquet files.
+    """
+    db_files = sorted(_RAW_DIR.glob("daily_basic*.parquet"))
+    if not db_files:
+        return {}
+    dfs = [pd.read_parquet(f) for f in db_files]
+    df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+    if "trade_date" not in df.columns:
+        return {}
+
+    M = len(codes)
+    T = len(common_dates)
+    value_cols = [c for c in ["total_mv", "pe", "pb", "dv_ttm"] if c in df.columns]
+    if not value_cols:
+        return {}
+
+    df["trade_date"] = pd.to_numeric(df["trade_date"], errors="coerce")
+    df = df[df["ts_code"].isin(codes)]
+    dates_int = [int(str(d).replace("-", "")[:8]) for d in common_dates]
+
+    result = {}
+    for col in value_cols:
+        pt = df.pivot_table(index="trade_date", columns="ts_code", values=col)
+        pt = pt.reindex(index=dates_int, columns=codes)
+        result[col] = pt.values.T.astype(np.float64)
+
+    return result
+
+
+def _merge_fundamentals_into_panel(
+    panel: dict,
+    codes: list[str],
+    common_dates: list,
+) -> None:
+    """Load balance/income/daily_basic from factor_investing and merge into panel."""
+    balance_path = _RAW_DIR / "batch_balance_all.parquet"
+    income_path = _RAW_DIR / "batch_income_all.parquet"
+
+    if balance_path.exists():
+        balance = pd.read_parquet(balance_path)
+        bal_cols = [c for c in ["bvps", "roe_pct"] if c in balance.columns]
+        if bal_cols:
+            bal_arrays = _align_quarterly_to_daily(
+                balance, "end_date", codes, common_dates, bal_cols, report_lag_days=45
+            )
+            for k, arr in bal_arrays.items():
+                panel[k] = arr
+            logger.info(f"  Merged balance: {list(bal_arrays.keys())}")
+
+    if income_path.exists():
+        income = pd.read_parquet(income_path)
+        inc_cols = [c for c in ["basic_eps", "n_income", "revenue"] if c in income.columns]
+        if inc_cols:
+            inc_arrays = _align_quarterly_to_daily(
+                income, "end_date", codes, common_dates, inc_cols, report_lag_days=45
+            )
+            for k, arr in inc_arrays.items():
+                panel[k] = arr
+            logger.info(f"  Merged income: {list(inc_arrays.keys())}")
+
+    daily_basic = _load_daily_basic_panel(codes, common_dates)
+    for k, arr in daily_basic.items():
+        panel[k] = arr
+    if daily_basic:
+        logger.info(f"  Merged daily_basic: {list(daily_basic.keys())}")
 
 
 def build_panel_from_parquet(
     parquet_path: Path = _PROCESSED_DAILY,
     max_stocks: Optional[int] = 300,
     min_days: int = 500,
+    include_fundamentals: bool = False,
 ) -> dict[str, np.ndarray]:
     """Build market panel directly from the factor_investing processed parquet.
 
@@ -33,18 +201,24 @@ def build_panel_from_parquet(
         parquet_path: Path to the daily parquet file.
         max_stocks: Maximum number of stocks to include.
         min_days: Minimum trading days a stock must have to be included.
+        include_fundamentals: If True, merge balance/income/daily_basic from factor_investing/raw.
 
     Returns:
-        Panel dict with keys: open, high, low, close, volume, amount, vwap, returns, codes, dates
+        Panel dict with keys: open, high, low, close, volume, amount, vwap, returns, codes, dates.
+        When include_fundamentals=True, adds: bvps, roe_pct, basic_eps, n_income, revenue,
+        total_mv, pe, pb, dv_ttm (when available).
     """
-    cache_key = f"parquet_panel_{max_stocks}_{min_days}"
-    cache_path = DATA_CACHE_DIR / f"{cache_key}.pkl"
-    if cache_path.exists():
-        logger.info(f"Loading cached panel from {cache_path}")
-        with open(cache_path, "rb") as f:
-            return pickle.load(f)
+    fund_suffix = "_fund" if include_fundamentals else ""
+    cache_key = f"parquet_panel_{max_stocks}_{min_days}{fund_suffix}"
+    cache_path = DATA_CACHE_DIR / cache_key
+    cached = _load_panel_cache(cache_path)
+    if cached is not None:
+        logger.info(f"Loaded cached panel (from local data) {cache_path}")
+        return cached
 
-    logger.info(f"Loading parquet from {parquet_path} ...")
+    logger.info(f"Using local data: {parquet_path}")
+    if not parquet_path.exists():
+        raise FileNotFoundError(f"Local data not found: {parquet_path}. Ensure factor_investing/data/processed/ exists.")
     df = pd.read_parquet(parquet_path)
     logger.info(f"Raw data: {len(df):,} rows, {df['ts_code'].nunique()} stocks")
 
@@ -110,11 +284,15 @@ def build_panel_from_parquet(
     panel["codes"] = clean_codes
     panel["dates"] = np.array(common_dates)
 
-    logger.info(f"Panel built: {M} assets x {T} days, fields: {list(field_map.keys()) + ['vwap', 'returns']}")
+    if include_fundamentals and _RAW_DIR.exists():
+        logger.info("Merging fundamental data from factor_investing/raw ...")
+        _merge_fundamentals_into_panel(panel, codes, common_dates)
 
-    with open(cache_path, "wb") as f:
-        pickle.dump(panel, f)
+    base_fields = list(field_map.keys()) + ["vwap", "returns"]
+    extra = [k for k in panel.keys() if k not in ("codes", "dates") and k not in base_fields]
+    logger.info(f"Panel built: {M} assets x {T} days, fields: {base_fields}{extra and [' + ' + str(extra) or '']}")
 
+    _save_panel_cache(panel, cache_path)
     return panel
 
 
@@ -127,18 +305,17 @@ def get_stock_list(index: str = "000300") -> list[str]:
     Returns:
         List of 6-digit stock codes (e.g. ['600519', '000858', ...]).
     """
-    cache_path = DATA_CACHE_DIR / f"stock_list_{index}.pkl"
+    cache_path = DATA_CACHE_DIR / f"stock_list_{index}.json"
     if cache_path.exists():
-        with open(cache_path, "rb") as f:
-            return pickle.load(f)
+        with open(cache_path, "r") as f:
+            return json.load(f)
+
+    if not HAS_AKSHARE:
+        logger.error("akshare not installed. Install with: pip install akshare")
+        return []
 
     try:
-        if index == "000300":
-            df = ak.index_stock_cons_csindex(symbol="000300")
-        elif index == "000905":
-            df = ak.index_stock_cons_csindex(symbol="000905")
-        else:
-            df = ak.index_stock_cons_csindex(symbol=index)
+        df = ak.index_stock_cons_csindex(symbol=index)
 
         code_col = None
         for col in df.columns:
@@ -150,8 +327,8 @@ def get_stock_list(index: str = "000300") -> list[str]:
 
         codes = df[code_col].astype(str).str.zfill(6).tolist()
 
-        with open(cache_path, "wb") as f:
-            pickle.dump(codes, f)
+        with open(cache_path, "w") as f:
+            json.dump(codes, f)
 
         logger.info(f"Fetched {len(codes)} stocks for index {index}")
         return codes
@@ -177,10 +354,13 @@ def get_historical_data(
         DataFrame with columns [date, open, high, low, close, volume, amount]
         indexed by date, or None on failure.
     """
-    cache_path = DATA_CACHE_DIR / f"hist_{code}_{start}_{end}.pkl"
+    cache_path = DATA_CACHE_DIR / f"hist_{code}_{start}_{end}.parquet"
     if cache_path.exists():
-        with open(cache_path, "rb") as f:
-            return pickle.load(f)
+        return pd.read_parquet(cache_path)
+
+    if not HAS_AKSHARE:
+        logger.error("akshare not installed. Install with: pip install akshare")
+        return None
 
     try:
         start_fmt = start.replace("-", "")
@@ -234,9 +414,7 @@ def get_historical_data(
         else:
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
 
-        with open(cache_path, "wb") as f:
-            pickle.dump(df, f)
-
+        df.to_parquet(cache_path)
         return df
 
     except Exception as e:
@@ -264,10 +442,10 @@ def build_market_panel(
         Also includes 'codes' (list) and 'dates' (array).
     """
     cache_key = f"panel_{len(codes)}_{max_stocks}_{start}_{end}"
-    cache_path = DATA_CACHE_DIR / f"{cache_key}.pkl"
-    if cache_path.exists():
-        with open(cache_path, "rb") as f:
-            return pickle.load(f)
+    cache_path = DATA_CACHE_DIR / cache_key
+    cached = _load_panel_cache(cache_path)
+    if cached is not None:
+        return cached
 
     if max_stocks:
         codes = codes[:max_stocks]
@@ -325,9 +503,7 @@ def build_market_panel(
     panel["codes"] = valid_codes
     panel["dates"] = np.array(common_dates)
 
-    with open(cache_path, "wb") as f:
-        pickle.dump(panel, f)
-
+    _save_panel_cache(panel, cache_path)
     return panel
 
 

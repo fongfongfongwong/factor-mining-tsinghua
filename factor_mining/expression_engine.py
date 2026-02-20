@@ -226,6 +226,8 @@ class ExpressionEngine:
         "/": "div",
     }
 
+    _ast_cache: dict[str, ASTNode] = {}
+
     def __init__(self, data_panel: dict[str, np.ndarray]):
         """
         Args:
@@ -243,9 +245,11 @@ class ExpressionEngine:
             2D signal array (M, T).
         """
         self._depth = 0
-        tokens = tokenize(expression)
-        parser = Parser(tokens)
-        ast = parser.parse()
+        if expression not in self._ast_cache:
+            tokens = tokenize(expression)
+            parser = Parser(tokens)
+            self._ast_cache[expression] = parser.parse()
+        ast = self._ast_cache[expression]
         result = self._eval_node(ast)
 
         if isinstance(result, (int, float)):
@@ -285,7 +289,7 @@ class ExpressionEngine:
 
     def _resolve_field(self, name: str) -> np.ndarray:
         if name in self.data and isinstance(self.data[name], np.ndarray):
-            return self.data[name].copy()
+            return self.data[name]
         raise ValueError(f"Unknown field: {name}")
 
     def _eval_binop(self, node: BinOpNode) -> np.ndarray:

@@ -2,10 +2,19 @@
 
 All operators work on 2D NumPy arrays of shape (M, T) where M = assets, T = time.
 NaN values are propagated correctly through all operations.
+
+Performance: uses bottleneck (C-compiled rolling windows) where available,
+falling back to pure NumPy. Bottleneck gives 10-100x speedup on rolling ops.
 """
 
 import numpy as np
 from scipy import stats as sp_stats
+
+try:
+    import bottleneck as bn
+    HAS_BN = True
+except ImportError:
+    HAS_BN = False
 
 EPS = 1e-10
 
@@ -16,6 +25,8 @@ EPS = 1e-10
 
 def ts_rank(x: np.ndarray, d: int) -> np.ndarray:
     """Rank of current value within past d periods (percentile, 0-1)."""
+    if HAS_BN:
+        return bn.move_rank(x, window=d, min_count=1, axis=1)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
@@ -31,71 +42,78 @@ def ts_rank(x: np.ndarray, d: int) -> np.ndarray:
 
 def ts_std(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling standard deviation over d periods."""
+    if HAS_BN:
+        return bn.move_std(x, window=d, min_count=1, axis=1, ddof=1)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nanstd(window, axis=1, ddof=1)
+        out[:, t] = np.nanstd(x[:, t - d + 1: t + 1], axis=1, ddof=1)
     return out
 
 
 def ts_mean(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling mean over d periods."""
+    if HAS_BN:
+        return bn.move_mean(x, window=d, min_count=1, axis=1)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nanmean(window, axis=1)
+        out[:, t] = np.nanmean(x[:, t - d + 1: t + 1], axis=1)
     return out
 
 
 def ts_sum(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling sum over d periods."""
+    if HAS_BN:
+        return bn.move_sum(x, window=d, min_count=1, axis=1)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nansum(window, axis=1)
+        out[:, t] = np.nansum(x[:, t - d + 1: t + 1], axis=1)
     return out
 
 
 def ts_min(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling minimum over d periods."""
+    if HAS_BN:
+        return bn.move_min(x, window=d, min_count=1, axis=1)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nanmin(window, axis=1)
+        out[:, t] = np.nanmin(x[:, t - d + 1: t + 1], axis=1)
     return out
 
 
 def ts_max(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling maximum over d periods."""
+    if HAS_BN:
+        return bn.move_max(x, window=d, min_count=1, axis=1)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nanmax(window, axis=1)
+        out[:, t] = np.nanmax(x[:, t - d + 1: t + 1], axis=1)
     return out
 
 
 def ts_argmin(x: np.ndarray, d: int) -> np.ndarray:
     """Position of minimum within rolling window (0 = oldest, d-1 = newest)."""
+    if HAS_BN:
+        return bn.move_argmin(x, window=d, min_count=1, axis=1).astype(np.float64)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nanargmin(window, axis=1).astype(float)
+        out[:, t] = np.nanargmin(x[:, t - d + 1: t + 1], axis=1).astype(float)
     return out
 
 
 def ts_argmax(x: np.ndarray, d: int) -> np.ndarray:
     """Position of maximum within rolling window (0 = oldest, d-1 = newest)."""
+    if HAS_BN:
+        return bn.move_argmax(x, window=d, min_count=1, axis=1).astype(np.float64)
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
-        window = x[:, t - d + 1: t + 1]
-        out[:, t] = np.nanargmax(window, axis=1).astype(float)
+        out[:, t] = np.nanargmax(x[:, t - d + 1: t + 1], axis=1).astype(float)
     return out
 
 
@@ -119,6 +137,16 @@ def ts_lag(x: np.ndarray, d: int) -> np.ndarray:
 
 def ts_corr(x: np.ndarray, y: np.ndarray, d: int) -> np.ndarray:
     """Rolling Pearson correlation between x and y over d periods."""
+    if HAS_BN:
+        mx = bn.move_mean(x, window=d, min_count=1, axis=1)
+        my = bn.move_mean(y, window=d, min_count=1, axis=1)
+        mxy = bn.move_mean(x * y, window=d, min_count=1, axis=1)
+        mx2 = bn.move_mean(x * x, window=d, min_count=1, axis=1)
+        my2 = bn.move_mean(y * y, window=d, min_count=1, axis=1)
+        cov = mxy - mx * my
+        sx = np.sqrt(np.clip(mx2 - mx ** 2, EPS, None))
+        sy = np.sqrt(np.clip(my2 - my ** 2, EPS, None))
+        return np.clip(cov / (sx * sy), -1.0, 1.0)
     M, T = x.shape
     out = np.full((M, T), np.nan)
     for t in range(d - 1, T):
@@ -137,6 +165,11 @@ def ts_corr(x: np.ndarray, y: np.ndarray, d: int) -> np.ndarray:
 
 def ts_cov(x: np.ndarray, y: np.ndarray, d: int) -> np.ndarray:
     """Rolling covariance between x and y over d periods."""
+    if HAS_BN:
+        mx = bn.move_mean(x, window=d, min_count=1, axis=1)
+        my = bn.move_mean(y, window=d, min_count=1, axis=1)
+        mxy = bn.move_mean(x * y, window=d, min_count=1, axis=1)
+        return mxy - mx * my
     M, T = x.shape
     out = np.full((M, T), np.nan)
     for t in range(d - 1, T):
@@ -150,6 +183,12 @@ def ts_cov(x: np.ndarray, y: np.ndarray, d: int) -> np.ndarray:
 
 def ts_skew(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling skewness over d periods."""
+    if HAS_BN:
+        mu = bn.move_mean(x, window=d, min_count=1, axis=1)
+        diff = x - mu
+        m2 = bn.move_mean(diff ** 2, window=d, min_count=1, axis=1)
+        m3 = bn.move_mean(diff ** 3, window=d, min_count=1, axis=1)
+        return m3 / (np.power(m2 + EPS, 1.5))
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
@@ -164,6 +203,12 @@ def ts_skew(x: np.ndarray, d: int) -> np.ndarray:
 
 def ts_kurt(x: np.ndarray, d: int) -> np.ndarray:
     """Rolling kurtosis over d periods."""
+    if HAS_BN:
+        mu = bn.move_mean(x, window=d, min_count=1, axis=1)
+        diff = x - mu
+        m2 = bn.move_mean(diff ** 2, window=d, min_count=1, axis=1)
+        m4 = bn.move_mean(diff ** 4, window=d, min_count=1, axis=1)
+        return m4 / (m2 ** 2 + EPS) - 3.0
     M, T = x.shape
     out = np.full_like(x, np.nan)
     for t in range(d - 1, T):
@@ -177,7 +222,7 @@ def ts_kurt(x: np.ndarray, d: int) -> np.ndarray:
 
 
 def ts_decay_linear(x: np.ndarray, d: int) -> np.ndarray:
-    """Linearly decaying weighted mean over d periods."""
+    """Linearly decaying weighted mean over d periods (recent values weighted more)."""
     M, T = x.shape
     weights = np.arange(1, d + 1, dtype=float)
     weights = weights / weights.sum()
@@ -234,9 +279,10 @@ def cs_rank(x: np.ndarray) -> np.ndarray:
     for t in range(T):
         col = x[:, t]
         valid = ~np.isnan(col)
-        if valid.sum() > 0:
-            ranked = sp_stats.rankdata(col[valid])
-            out[valid, t] = ranked / valid.sum()
+        n = valid.sum()
+        if n > 0:
+            order = np.argsort(np.argsort(col[valid]))
+            out[valid, t] = (order + 1.0) / n
     return out
 
 

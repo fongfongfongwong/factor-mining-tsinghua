@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-FactorMiner CLI Runner
-======================
-Runs the Ralph Loop mining cycle using existing A-share data from
-factor_investing/data/processed/daily_20180101_20241231.parquet.
+FactorMiner CLI Runner（与 factor_investing 数据合并）
+=====================================================
+数据统一从 factor_investing/data 读取（OHLCV + 基本面）。
 
 Usage:
-    python run.py                        # Run mining (3 rounds, batch=5 for quick test)
-    python run.py --rounds 20 --batch 10 # Full mining run
-    python run.py --list                 # List discovered factors
-    python run.py --backtest             # Backtest the factor library
+    python run.py                        # 默认: mining
+    python run.py all                    # 合并流程: 数据→生成→筛选→组合→报告
+    python run.py pipeline               # 同上，可调参数
+    python run.py mine --rounds 20 --batch 10
+    python run.py list                   # 列出因子库
+    python run.py backtest               # 回测因子库
+    python run.py combine                # 仅运行因子组合器
+    python run.py evaluate               # 全模型评估：IC 图 + P&L（1亿模拟）
+    python run.py report                 # 生成完整金融报告 + 系统审计（Markdown）
+    python run.py server                 # 启动 Web 面板
 """
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
@@ -25,16 +28,17 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import (
-    LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
-    IC_THRESHOLD, CORR_THRESHOLD,
+    LLM_API_KEY, IC_THRESHOLD, CORR_THRESHOLD,
     TARGET_LIBRARY_SIZE, FACTOR_LIBRARY_PATH, EXPERIENCE_MEMORY_PATH,
 )
 from data.stock_data import build_panel_from_parquet, calculate_returns
 from factor_mining.expression_engine import ExpressionEngine
-from factor_mining.factor_library import FactorLibrary, compute_ic, compute_icir
-from factor_mining.experience_memory import ExperienceMemory
+from factor_mining.factor_library import FactorLibrary
+from factor_mining.miner import FactorMiner
+from factor_mining.combiner import FactorCombiner, CombinerConfig
+from factor_mining.generator import generate_all_candidates, screen_factors
 from backtest.engine import run_factor_backtest, run_library_backtest
-from backtest.metrics import calc_ic_series, factor_summary
+from backtest.metrics import calc_ic_series, calc_icir
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,15 +47,18 @@ logging.basicConfig(
 logger = logging.getLogger("factorminer")
 
 
-def build_data(max_stocks: int = 200):
-    """Load A-share data and build panels for fast screening and full validation."""
-    logger.info("Loading A-share data from factor_investing parquet...")
-    full_panel = build_panel_from_parquet(max_stocks=max_stocks, min_days=500)
+def build_data(max_stocks: int = 200, include_fundamentals: bool = False):
+    """Load A-share data from factor_investing（合并数据源），可选基本面."""
+    logger.info("Loading A-share data from factor_investing ...")
+    full_panel = build_panel_from_parquet(
+        max_stocks=max_stocks,
+        min_days=500,
+        include_fundamentals=include_fundamentals,
+    )
     fwd_returns = calculate_returns(full_panel)
     M, T = full_panel["close"].shape
     logger.info(f"Full panel: {M} stocks x {T} days")
 
-    # Fast screening subset (first 50 stocks)
     fast_n = min(50, M)
     fast_panel = {}
     for key, val in full_panel.items():
@@ -67,231 +74,31 @@ def build_data(max_stocks: int = 200):
 
 
 async def run_mining(args):
-    """Run the Ralph Loop mining cycle."""
+    """Run the Ralph Loop mining cycle via the FactorMiner class."""
     if not LLM_API_KEY:
         logger.error("KIMI_API_KEY not set. Add it to .env file.")
         sys.exit(1)
 
     full_panel, fwd_returns, fast_panel, fast_fwd = build_data(args.max_stocks)
 
-    library = FactorLibrary()
-    memory = ExperienceMemory()
+    miner = FactorMiner(
+        batch_size=args.batch,
+        max_rounds=args.rounds,
+        ic_threshold=args.ic_threshold,
+        corr_threshold=args.corr_threshold,
+        target_size=args.target_size,
+    )
+    miner.inject_data(
+        fast_panel=fast_panel,
+        full_panel=full_panel,
+        fast_fwd_returns=fast_fwd,
+        full_fwd_returns=fwd_returns,
+    )
 
-    fast_engine = ExpressionEngine(fast_panel)
-    full_engine = ExpressionEngine(full_panel)
+    await miner.run()
 
-    from openai import OpenAI
-    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
-
-    from factor_mining.miner import GENERATION_PROMPT
-    from factor_mining.expression_engine import validate_expression
-    from factor_mining.factor_library import compute_correlation, FactorRecord
-    import re
-
-    logger.info(f"Starting mining: {args.rounds} rounds, batch_size={args.batch}")
-    logger.info(f"IC threshold={args.ic_threshold}, corr threshold={args.corr_threshold}")
-    logger.info(f"Current library size: {library.size}")
-
-    total_admitted = 0
-    total_candidates = 0
-
-    for round_num in range(1, args.rounds + 1):
-        if library.size >= args.target_size:
-            logger.info(f"Target size {args.target_size} reached!")
-            break
-
-        memory.update_round(round_num)
-        logger.info(f"\n{'='*60}")
-        logger.info(f"ROUND {round_num}/{args.rounds}")
-        logger.info(f"{'='*60}")
-
-        # --- 1. Retrieve ---
-        ctx = memory.retrieve(library.size)
-        prompt = GENERATION_PROMPT.format(
-            batch_size=args.batch,
-            library_size=library.size,
-            **ctx,
-        )
-
-        # --- 2. Generate ---
-        logger.info(f"Calling Claude to generate {args.batch} candidates...")
-        try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            response_text = response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            continue
-
-        # Parse candidates
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
-        if not json_match:
-            logger.warning("No JSON array found in LLM response")
-            continue
-
-        try:
-            raw_candidates = json.loads(json_match.group())
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error: {e}")
-            continue
-
-        candidates = []
-        for item in raw_candidates:
-            expr = item.get("expression", "").strip()
-            logic = item.get("logic", "").strip()
-            if expr:
-                valid, err = validate_expression(expr)
-                if valid:
-                    candidates.append({"expression": expr, "logic": logic})
-                else:
-                    logger.debug(f"  Invalid: {expr} -> {err}")
-
-        logger.info(f"Parsed {len(candidates)} valid candidates from LLM")
-        total_candidates += len(candidates)
-
-        # --- 3. Evaluate ---
-        batch_results = []
-        for i, cand in enumerate(candidates):
-            expr = cand["expression"]
-            result = {
-                "expression": expr,
-                "logic": cand.get("logic", ""),
-                "admitted": False,
-                "reason": "",
-                "ic_mean": 0.0,
-            }
-
-            # Stage 1: Fast IC screen
-            try:
-                fast_signal = fast_engine.evaluate(expr)
-            except Exception as e:
-                result["reason"] = f"Eval error: {e}"
-                batch_results.append(result)
-                continue
-
-            nan_ratio = np.isnan(fast_signal).sum() / fast_signal.size
-            if nan_ratio > 0.5:
-                result["reason"] = f"Too many NaNs ({nan_ratio:.0%})"
-                batch_results.append(result)
-                continue
-
-            fast_ic = compute_ic(fast_signal, fast_fwd)
-            valid_ic = fast_ic[~np.isnan(fast_ic)]
-            if len(valid_ic) < 10:
-                result["reason"] = "Insufficient IC data"
-                batch_results.append(result)
-                continue
-
-            ic_mean = float(np.mean(valid_ic))
-            if abs(ic_mean) < args.ic_threshold:
-                result["reason"] = f"Fast IC too low: |{ic_mean:.4f}| < {args.ic_threshold}"
-                result["ic_mean"] = ic_mean
-                batch_results.append(result)
-                continue
-
-            logger.info(f"  [{i+1}/{len(candidates)}] {expr[:60]} -> fast IC={ic_mean:.4f} PASS")
-
-            # Stage 2+3: Full validation + correlation check
-            try:
-                full_signal = full_engine.evaluate(expr)
-            except Exception as e:
-                result["reason"] = f"Full eval error: {e}"
-                batch_results.append(result)
-                continue
-
-            full_ic = compute_ic(full_signal, fwd_returns)
-            full_valid_ic = full_ic[~np.isnan(full_ic)]
-            if len(full_valid_ic) < 10:
-                result["reason"] = "Insufficient full IC data"
-                batch_results.append(result)
-                continue
-
-            full_ic_mean = float(np.mean(full_valid_ic))
-            full_ic_std = float(np.std(full_valid_ic))
-            full_icir = compute_icir(full_ic)
-            result["ic_mean"] = full_ic_mean
-
-            if abs(full_ic_mean) < args.ic_threshold:
-                result["reason"] = f"Full IC too low: |{full_ic_mean:.4f}|"
-                batch_results.append(result)
-                continue
-
-            # Correlation check
-            library.clear_signal_cache()
-            max_corr = 0.0
-            max_corr_idx = -1
-            for j, existing in enumerate(library.factors):
-                try:
-                    existing_signal = full_engine.evaluate(existing.expression)
-                    corr = abs(compute_correlation(full_signal, existing_signal))
-                    if corr > max_corr:
-                        max_corr = corr
-                        max_corr_idx = j
-                except Exception:
-                    continue
-
-            if max_corr >= args.corr_threshold:
-                # Stage 2.5: Replacement check
-                if max_corr_idx >= 0:
-                    existing_ic = abs(library.factors[max_corr_idx].ic_mean)
-                    if abs(full_ic_mean) > existing_ic * 1.1:
-                        result["admitted"] = True
-                        result["reason"] = f"Replacement: IC={full_ic_mean:.4f} > {existing_ic:.4f}"
-                    else:
-                        result["reason"] = f"Correlated ({max_corr:.3f}) and not stronger"
-                        batch_results.append(result)
-                        continue
-                else:
-                    result["reason"] = f"Too correlated: {max_corr:.3f}"
-                    batch_results.append(result)
-                    continue
-            else:
-                result["admitted"] = True
-                result["reason"] = f"Admitted: IC={full_ic_mean:.4f}, max_corr={max_corr:.3f}"
-
-            if result["admitted"]:
-                # Compute turnover
-                positions = full_signal[:, 1:] - full_signal[:, :-1]
-                turnover = float(np.nanmean(np.nanmean(np.abs(positions), axis=0)))
-
-                record = FactorRecord(
-                    expression=expr,
-                    ic_mean=full_ic_mean,
-                    ic_std=full_ic_std,
-                    icir=full_icir,
-                    max_correlation=max_corr,
-                    turnover=turnover,
-                    logic_description=cand.get("logic", ""),
-                    mining_round=round_num,
-                )
-                replace_idx = max_corr_idx if max_corr >= args.corr_threshold else None
-                library.admit(record, replace_idx)
-                total_admitted += 1
-                logger.info(f"  >>> ADMITTED: {expr[:60]}")
-                logger.info(f"      IC={full_ic_mean:.4f} ICIR={full_icir:.3f} corr={max_corr:.3f}")
-
-            batch_results.append(result)
-
-        # --- 4. Distill ---
-        memory.formation(batch_results)
-        admitted_this_round = sum(1 for r in batch_results if r["admitted"])
-        logger.info(f"\nRound {round_num} summary: {admitted_this_round}/{len(batch_results)} admitted")
-        logger.info(f"Library size: {library.size}")
-
-    logger.info(f"\n{'='*60}")
-    logger.info(f"MINING COMPLETE")
-    logger.info(f"{'='*60}")
-    logger.info(f"Total candidates: {total_candidates}")
-    logger.info(f"Total admitted: {total_admitted}")
-    logger.info(f"Library size: {library.size}")
-    logger.info(f"Factor library saved to: {FACTOR_LIBRARY_PATH}")
-    logger.info(f"Experience memory saved to: {EXPERIENCE_MEMORY_PATH}")
-
-    if library.size > 0:
-        print_library(library)
+    if miner.library.size > 0:
+        print_library(miner.library)
 
 
 def list_factors_cmd():
@@ -331,7 +138,6 @@ def run_backtest_cmd(args):
     print(f"Backtesting {library.size} factors")
     print(f"{'='*80}")
 
-    # Individual factor backtests
     print(f"\n{'Expression':60} {'Sharpe':>8} {'AnnRet':>8} {'MaxDD':>8} {'WinR':>8}")
     print(f"{'-'*60} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
     signals = {}
@@ -345,7 +151,6 @@ def run_backtest_cmd(args):
             print(f"{f.expression[:60]:60} ERROR: {e}")
 
     if signals:
-        # Library-level backtest
         for method in ["equal", "ic_weighted", "icir_weighted"]:
             bt = run_library_backtest(signals, fwd_returns, method=method)
             print(f"\nLibrary ({method:15}): Sharpe={bt['sharpe']:.3f} AnnRet={bt['annual_return']*100:.1f}% MaxDD={bt['max_drawdown']*100:.1f}% Win={bt['win_ratio']*100:.1f}%")
@@ -353,11 +158,122 @@ def run_backtest_cmd(args):
     print()
 
 
+def run_combine_cmd(args):
+    """Run the factor combiner (LightGBM / HGBR) for IC optimization."""
+    from factor_mining.operators import ts_mean, ts_std, ts_rank, ts_delta, cs_rank, ts_corr, ts_skew
+
+    library = FactorLibrary()
+    if library.size == 0:
+        logger.info("Factor library is empty. Run mining first.")
+        return
+
+    full_panel, fwd_returns, _, _ = build_data(args.max_stocks)
+    engine = ExpressionEngine(full_panel)
+    M, T = full_panel["close"].shape
+
+    signals = {}
+    for f in library.factors:
+        try:
+            signals[f.expression] = engine.evaluate(f.expression)
+        except Exception:
+            pass
+
+    close = full_panel["close"]
+    vol = full_panel["volume"]
+    ret = full_panel["returns"]
+    high, low, vwap = full_panel["high"], full_panel["low"], full_panel["vwap"]
+
+    for d in [5, 10, 20, 40, 60]:
+        r = np.full((M, T), np.nan)
+        if d < T:
+            r[:, d:] = close[:, d:] / close[:, :-d] - 1
+        signals[f"ret_{d}d"] = r
+        signals[f"cs_rank_ret_{d}d"] = cs_rank(r)
+
+    for d in [5, 10, 20, 40]:
+        signals[f"vol_{d}d"] = ts_std(ret, d)
+        vr = vol / (ts_mean(vol, d) + 1e-10)
+        signals[f"vol_ratio_{d}"] = vr
+
+    for d in [5, 10, 20, 40]:
+        signals[f"corr_cv_{d}"] = ts_corr(close, vol, d)
+
+    hl = (high - low) / (close + 1e-10)
+    signals["hl_range"] = hl
+    signals["vwap_dev"] = (close - vwap) / (vwap + 1e-10)
+    signals["intraday"] = (close - full_panel["open"]) / (full_panel["open"] + 1e-10)
+
+    for d in [10, 20, 40]:
+        signals[f"skew_{d}"] = ts_skew(ret, d)
+        signals[f"ts_rank_close_{d}"] = ts_rank(close, d)
+
+    logger.info(f"Total combiner input: {len(signals)} features")
+
+    cfg = CombinerConfig(backend=args.backend, train_window=500, test_step=60, purge_gap=5)
+    combiner = FactorCombiner(cfg)
+    report = combiner.run(signals, fwd_returns)
+    combiner.print_report(report)
+
+
+def run_full_pipeline_cmd(args):
+    """合并流程：加载数据(含基本面)→生成候选→筛选(IC/HLZ/OOS)→组合→报告."""
+    import time
+    logger.info("=" * 70)
+    logger.info("  合并流程 (FactorMiner + factor_investing 数据)")
+    logger.info("=" * 70)
+    t0 = time.time()
+
+    panel = build_panel_from_parquet(
+        max_stocks=args.max_stocks,
+        min_days=500,
+        include_fundamentals=getattr(args, "fundamentals", False),
+    )
+    fwd = calculate_returns(panel)
+    M, T = panel["close"].shape
+    logger.info(f"Panel: {M} 股 x {T} 日, 基本面={getattr(args, 'fundamentals', False)}")
+
+    engine = ExpressionEngine(panel)
+    candidates = generate_all_candidates(
+        max_depth=getattr(args, "max_depth", 3),
+        include_fundamentals=getattr(args, "fundamentals", False),
+    )
+    logger.info(f"生成候选: {len(candidates)}")
+
+    survivors = screen_factors(
+        candidates,
+        engine,
+        fwd,
+        ic_threshold=getattr(args, "ic_threshold", 0.015),
+        use_hlz=getattr(args, "use_hlz", True),
+        use_oos=getattr(args, "use_oos", True),
+        max_corr=getattr(args, "max_corr", 0.75),
+        max_keep=getattr(args, "max_keep", 2000),
+        num_workers=getattr(args, "workers", 1),
+        positive_ic_only=getattr(args, "positive_ic_only", True),
+    )
+
+    if not survivors:
+        logger.warning("无因子通过筛选，可降低 --ic-threshold 或放宽 --no-hlz/--no-oos")
+        logger.info(f"合并流程结束 ({time.time()-t0:.1f}s)")
+        return
+
+    signals = {expr: data["signal"] for expr, data in survivors.items()}
+    cfg = CombinerConfig(
+        backend=getattr(args, "backend", "auto"),
+        train_window=500,
+        test_step=60,
+        purge_gap=5,
+    )
+    combiner = FactorCombiner(cfg)
+    report = combiner.run(signals, fwd)
+    combiner.print_report(report)
+    logger.info(f"合并流程结束 ({time.time()-t0:.1f}s), 幸存因子 {len(survivors)}, 组合 IC={report.ic_mean:.4f}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="FactorMiner CLI")
     sub = parser.add_subparsers(dest="command", help="Command to run")
 
-    # Mine
     mine_p = sub.add_parser("mine", help="Run the Ralph Loop mining cycle")
     mine_p.add_argument("--rounds", type=int, default=3, help="Number of mining rounds (default: 3)")
     mine_p.add_argument("--batch", type=int, default=5, help="Candidates per round (default: 5)")
@@ -366,21 +282,63 @@ def main():
     mine_p.add_argument("--corr-threshold", type=float, default=CORR_THRESHOLD)
     mine_p.add_argument("--target-size", type=int, default=TARGET_LIBRARY_SIZE)
 
-    # List
     sub.add_parser("list", help="List discovered factors")
 
-    # Backtest
     bt_p = sub.add_parser("backtest", help="Backtest the factor library")
     bt_p.add_argument("--max-stocks", type=int, default=200)
 
-    # Server
+    comb_p = sub.add_parser("combine", help="仅运行因子组合器 (LightGBM/HGBR/Ridge)")
+    comb_p.add_argument("--max-stocks", type=int, default=300)
+    comb_p.add_argument("--backend", type=str, default="auto", choices=["auto", "lightgbm", "hgbr", "ridge"])
+
+    pipe_p = sub.add_parser("pipeline", help="合并流程: 生成→筛选→组合 (可调参数)")
+    pipe_p.add_argument("--max-stocks", type=int, default=500)
+    pipe_p.add_argument("--max-depth", type=int, default=3)
+    pipe_p.add_argument("--fundamentals", action="store_true", help="使用 factor_investing 基本面数据")
+    pipe_p.add_argument("--ic-threshold", type=float, default=0.015)
+    pipe_p.add_argument("--max-keep", type=int, default=2000)
+    pipe_p.add_argument("--max-corr", type=float, default=0.75)
+    pipe_p.add_argument("--no-hlz", dest="use_hlz", action="store_false", default=True)
+    pipe_p.add_argument("--no-oos", dest="use_oos", action="store_false", default=True)
+    pipe_p.add_argument("--workers", type=int, default=1)
+    pipe_p.add_argument("--allow-negative-ic", dest="positive_ic_only", action="store_false", default=True, help="默认仅保留正IC因子")
+    pipe_p.add_argument("--backend", type=str, default="auto")
+
+    reinit_p = sub.add_parser("reinit", help="清空因子库与经验记忆，重新开始（保证只做正收益）")
+    reinit_p.add_argument("--yes", action="store_true", help="确认执行")
+
+    all_p = sub.add_parser("all", help="合并流程（默认）: 数据+基本面 → 生成→筛选→组合")
+    all_p.add_argument("--max-stocks", type=int, default=300)
+    all_p.add_argument("--max-depth", type=int, default=2, help="2=快, 3=更多候选")
+    all_p.add_argument("--fundamentals", action="store_true")
+    all_p.add_argument("--ic-threshold", type=float, default=0.015)
+    all_p.add_argument("--max-keep", type=int, default=500)
+    all_p.add_argument("--backend", type=str, default="auto")
+
+    eval_p = sub.add_parser("evaluate", help="Full evaluation: IC plots + P&L (1亿 RMB simulation)")
+    eval_p.add_argument("--max-stocks", type=int, default=300)
+    eval_p.add_argument("--fundamentals", action="store_true")
+    eval_p.add_argument("--notional", type=float, default=100_000_000, help="Daily notional RMB (default 1e8)")
+    eval_p.add_argument("--output-dir", type=str, default=None)
+    eval_p.add_argument("--target-vol", type=float, default=0.05, help="Target annual vol (default 0.05)")
+    eval_p.add_argument("--max-dd", type=float, default=0.05, help="Max drawdown cap (default 0.05)")
+    eval_p.add_argument("--vol-lookback", type=int, default=20)
+
+    report_p = sub.add_parser("report", help="Generate full Financial Report + System Audit (Markdown)")
+    report_p.add_argument("--max-stocks", type=int, default=300)
+    report_p.add_argument("--fundamentals", action="store_true")
+    report_p.add_argument("--notional", type=float, default=100_000_000)
+    report_p.add_argument("--output-dir", type=str, default=None)
+    report_p.add_argument("--target-vol", type=float, default=0.05)
+    report_p.add_argument("--max-dd", type=float, default=0.05)
+    report_p.add_argument("--vol-lookback", type=int, default=20)
+
     srv_p = sub.add_parser("server", help="Start the web dashboard")
     srv_p.add_argument("--port", type=int, default=8000)
 
     args = parser.parse_args()
 
     if args.command is None:
-        # Default: quick mining test
         args.command = "mine"
         args.rounds = 3
         args.batch = 5
@@ -395,9 +353,54 @@ def main():
         list_factors_cmd()
     elif args.command == "backtest":
         run_backtest_cmd(args)
+    elif args.command == "combine":
+        run_combine_cmd(args)
+    elif args.command == "pipeline":
+        run_full_pipeline_cmd(args)
+    elif args.command == "all":
+        # 合并流程：补全 all 的默认参数后走 pipeline 逻辑
+        args.max_keep = getattr(args, "max_keep", 500)
+        args.max_corr = 0.75
+        args.use_hlz = True
+        args.use_oos = True
+        args.workers = 1
+        run_full_pipeline_cmd(args)
+    elif args.command == "reinit":
+        if not getattr(args, "yes", False):
+            logger.error("Re-init will clear factor library and experience memory. Run with --yes to confirm.")
+            sys.exit(1)
+        for name, path in [("factor_library", FACTOR_LIBRARY_PATH), ("experience_memory", EXPERIENCE_MEMORY_PATH)]:
+            p = Path(path)
+            if p.exists():
+                p.write_text("[]" if "library" in name else "{}")
+                logger.info("Cleared %s", p)
+        logger.info("Re-init done. Run pipeline or all to repopulate with positive-IC-only factors.")
+
+    elif args.command == "evaluate":
+        from evaluate_model import run_evaluation
+        run_evaluation(
+            max_stocks=args.max_stocks,
+            include_fundamentals=args.fundamentals,
+            daily_notional_rmb=args.notional,
+            output_dir=Path(args.output_dir) if getattr(args, "output_dir") else None,
+            target_vol_ann=getattr(args, "target_vol", 0.05),
+            max_dd_target=getattr(args, "max_dd", 0.05),
+            vol_lookback=getattr(args, "vol_lookback", 20),
+        )
+    elif args.command == "report":
+        from generate_report import run_report
+        run_report(
+            max_stocks=args.max_stocks,
+            include_fundamentals=args.fundamentals,
+            notional=getattr(args, "notional", 100_000_000),
+            output_dir=getattr(args, "output_dir"),
+            target_vol_ann=getattr(args, "target_vol", 0.05),
+            max_dd_target=getattr(args, "max_dd", 0.05),
+            vol_lookback=getattr(args, "vol_lookback", 20),
+        )
     elif args.command == "server":
         import uvicorn
-        uvicorn.run("api.main:app", host="0.0.0.0", port=args.port, reload=True)
+        uvicorn.run("api.main:app", host="127.0.0.1", port=args.port, reload=False)
 
 
 if __name__ == "__main__":

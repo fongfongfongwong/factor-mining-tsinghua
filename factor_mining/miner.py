@@ -26,7 +26,9 @@ from config import (
 )
 from data.stock_data import build_market_panel, calculate_returns, get_stock_list
 from .expression_engine import ExpressionEngine, validate_expression
-from .factor_library import FactorLibrary, FactorRecord, compute_ic, compute_icir
+from .factor_library import (
+    FactorLibrary, FactorRecord, compute_ic, compute_icir, compute_correlation,
+)
 from .experience_memory import ExperienceMemory
 
 logger = logging.getLogger(__name__)
@@ -120,6 +122,23 @@ class FactorMiner:
         self._full_engine: Optional[ExpressionEngine] = None
         self._fast_fwd_returns: Optional[np.ndarray] = None
         self._full_fwd_returns: Optional[np.ndarray] = None
+        self._data_injected = False
+
+    def inject_data(
+        self,
+        fast_panel: dict,
+        full_panel: dict,
+        fast_fwd_returns: np.ndarray,
+        full_fwd_returns: np.ndarray,
+    ):
+        """Inject pre-built data panels (used by CLI to avoid re-fetching)."""
+        self._fast_panel = fast_panel
+        self._full_panel = full_panel
+        self._fast_engine = ExpressionEngine(fast_panel)
+        self._full_engine = ExpressionEngine(full_panel)
+        self._fast_fwd_returns = fast_fwd_returns
+        self._full_fwd_returns = full_fwd_returns
+        self._data_injected = True
 
     @property
     def is_running(self) -> bool:
@@ -163,11 +182,11 @@ class FactorMiner:
         self._full_fwd_returns = calculate_returns(self._full_panel)
 
     async def _call_llm(self, prompt: str) -> str:
-        """Call Kimi 2.5 API (OpenAI-compatible)."""
+        """Call Kimi 2.5 API (OpenAI-compatible) using async client."""
         try:
-            from openai import OpenAI
-            client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
-            response = client.chat.completions.create(
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+            response = await client.chat.completions.create(
                 model=LLM_MODEL,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
@@ -271,8 +290,7 @@ class FactorMiner:
         full_icir = compute_icir(full_ic)
         result["ic_mean"] = full_ic_mean
 
-        self.library.clear_signal_cache()
-        _ = self.library.get_all_signals(self._full_engine)
+        self.library.ensure_signals_cached(self._full_engine)
 
         admitted, reason, replace_idx = self.library.check_admission(
             full_signal, full_ic,
@@ -291,7 +309,6 @@ class FactorMiner:
             max_corr = 0.0
             for existing in self.library.factors:
                 if existing.expression in self.library._signal_cache:
-                    from .factor_library import compute_correlation
                     corr = abs(compute_correlation(
                         full_signal,
                         self.library._signal_cache[existing.expression],
@@ -367,9 +384,10 @@ class FactorMiner:
         self._status = "starting"
 
         try:
-            await self._log("Preparing data panels...")
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._prepare_data)
+            if not self._data_injected:
+                await self._log("Preparing data panels...")
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._prepare_data)
             await self._log(
                 f"Data ready: fast={self._fast_panel['close'].shape}, "
                 f"full={self._full_panel['close'].shape}"

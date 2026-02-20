@@ -13,19 +13,6 @@ class MiningConfig(BaseModel):
     stock_universe: str = Field(default="000300", description="Index code: 000300 or 000905")
 
 
-class FactorRecord(BaseModel):
-    factor_id: str
-    expression: str
-    ic_mean: float
-    ic_std: float
-    icir: float
-    max_correlation: float
-    turnover: float
-    logic_description: str
-    admitted_at: float
-    mining_round: int
-
-
 class BacktestRequest(BaseModel):
     factor_id: Optional[str] = Field(default=None, description="Single factor ID, or None for full library")
     method: str = Field(default="ic_weighted", description="Combination method: equal, ic_weighted, icir_weighted")

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "factor-miner"
+version = "0.1.0"
+description = "LLM-driven self-evolving alpha factor mining for Chinese A-shares"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "scipy>=1.11.0",
+    "bottleneck>=1.3.7",
+    "akshare>=1.12.0",
+    "openai>=1.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "websockets>=12.0",
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
+    "jinja2>=3.1.0",
+    "aiofiles>=23.2.0",
+    "scikit-learn>=1.3.0",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.0.0"]
+lgbm = ["lightgbm>=4.0.0"]
+all = ["torch>=2.0.0", "lightgbm>=4.0.0"]
+
+[project.scripts]
+factorminer = "run:main"
+
+[tool.setuptools.packages.find]
+include = ["factor_mining*", "backtest*", "data*", "evaluator*", "api*"]
