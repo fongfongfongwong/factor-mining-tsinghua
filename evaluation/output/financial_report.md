@@ -29,7 +29,21 @@
 
 ## 1. Factor Analysis (All Mined Factors)
 
-### 1.1 Mined Factor Universe
+### 1.1 Research Basis
+
+Our factor mining approach draws on recent advances in automated alpha discovery:
+
+| Paper | Method | Key Contribution |
+|-------|--------|-----------------|
+| **AlphaPROBE** (arXiv:2602.11917, PKU/Zhengren Quant, 2026) | Bayesian retrieval + DAG-aware evolution | Reframes alpha mining as DAG navigation; outperforms 8 baselines on CSI300/500/1000. [Paper](https://arxiv.org/abs/2602.11917) \| [Code](https://github.com/gta0804/AlphaPROBE) |
+| **QuantaAlpha** (arXiv:2602.07085, 2026) | Evolutionary LLM-driven mining | IC=0.1501, ARR=27.75% on CSI300 |
+| **AlphaForge** (AAAI 2025) | Generative-predictive NN + dynamic combination | Enhanced portfolio returns |
+| **Gu, Kelly, Xiu** (RFS 2020) | ML asset pricing | Tree + NN dominate; momentum/liquidity/vol are key |
+| **WorldQuant 101** (2015) | 101 formulaic alphas | Avg pairwise corr 15.9% |
+
+Our current system uses exhaustive depth-3 formulaic generation with IC-weighted signed combination. Future work will integrate AlphaPROBE's DAG-aware evolutionary approach for improved diversity and efficiency.
+
+### 1.2 Mined Factor Universe
 
 - **Candidates generated**: 22,110 (depth-3 formulaic alpha)
 - **Passed IC > 0.005**: 19,618
@@ -45,7 +59,7 @@
 | Min IC | -0.0802 |
 | Median \|IC\| | 0.0207 |
 
-### 1.2 Top 50 Factors by |IC| (Used in Model)
+### 1.3 Top 50 Factors by |IC| (Used in Model)
 
 | # | Expression | IC Mean | ICIR |
 |---|-----------|---------|------|
@@ -100,7 +114,7 @@
 | 49 | `cs_rank(ts_sum(div(high, low), 5))` | -0.0665 | -0.381 |
 | 50 | `ts_mean(div(high, low), 5)` | -0.0665 | -0.381 |
 
-### 1.3 Factor IC Summary (Model Signals)
+### 1.4 Factor IC Summary (Model Signals)
 
 - Total signals in model: **2211**
 - Positive IC: 351 (15.9%)

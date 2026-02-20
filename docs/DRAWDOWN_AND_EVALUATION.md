@@ -57,9 +57,24 @@
 
 ## 6. 参考文献（可进一步查阅）
 
+### 回撤控制与评估
 - SSRN 2053854 — Optimal Portfolio Strategy to Control Maximum Drawdown  
 - SSRN 3583864 — Drawdowns (Van Hemert et al.)  
 - Research Affiliates — Harnessing Volatility Targeting in Multi-Asset Portfolios  
 - SSRN 2460551 — The Deflated Sharpe Ratio (Bailey et al.)  
 - SSRN 2745220 — All that Glitters Is Not Gold: Backtest vs OOS  
 - SSRN 2346600 — Telling the Good from the Bad and the Ugly: Evaluating Backtested Strategies  
+
+### Alpha Factor Mining
+- **AlphaPROBE** (arXiv:2602.11917, Peking University / Zhengren Quant, Feb 2026)  
+  Alpha Mining via Principled Retrieval and On-graph Biased Evolution.  
+  将 alpha 挖掘重新定义为 DAG 上的策略导航：Bayesian Factor Retriever（贝叶斯种子选择）+ DAG-aware Factor Generator（基于祖先链的上下文感知生成），在 CSI300/CSI500/CSI1000 上显著优于 8 个基线。  
+  Paper: https://arxiv.org/abs/2602.11917  
+  Code: https://github.com/gta0804/AlphaPROBE  
+- **AlphaForge** (AAAI 2025, arXiv:2406.18394)  
+  Generative-predictive NN for formulaic alpha mining with dynamic combination.  
+- **QuantaAlpha** (arXiv:2602.07085)  
+  Evolutionary LLM-driven alpha mining; IC=0.1501 on CSI300.  
+- Gu, Kelly, Xiu (2020) — Empirical Asset Pricing via Machine Learning (RFS)  
+- Harvey, Liu, Zhu (2016) — …and the Cross-Section of Expected Returns (Factor Zoo)  
+- WorldQuant 101 Alphas (2015) — 101 formulaic alpha factors  
